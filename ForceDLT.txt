@@ -1,0 +1,118 @@
+✅ Run this (works even without events table)
+kubectl exec -n platform deploy/platform-api -- node -e "
+const Database=require('better-sqlite3');
+const db=new Database('/data/platform.db');
+db.prepare('delete from stores where id=?').run('cd528974');
+console.log('deleted');
+"
+
+
+Then verify:
+
+curl -s http://127.0.0.1:8080/stores
+
+
+Expected: []
+
+
+kubectl get ns | grep '^store-' 
+
+kubectl delete ns store-xxxx
+
+
+
+
+
+
+
+
+
+
+
+
+
+Step 2) 90% likely fix: PVC is missing/terminating again
+
+Check PVC:
+
+kubectl get pvc -n platform
+
+
+If you see none or Terminating, fix:
+
+If Terminating:
+
+kubectl patch pvc -n platform platform-api-pvc -p '{"metadata":{"finalizers":[]}}' --type=merge
+
+
+If missing:
+
+helm upgrade --install platform ./charts/platform -n platform -f ./charts/platform/values.yaml -f ./charts/platform/values-local.yaml
+
+
+Then:
+
+kubectl get pods -n platform
+
+store-platform/
+│
+├── backend-node/                # Node API / Orchestrator
+│   ├── src/
+│   │   ├── server.ts
+│   │   ├── provisioner.ts
+│   │   ├── kube.ts
+│   │   ├── db.ts
+│   │   ├── lease.ts
+│   │   ├── namespace.ts
+│   │   ├── readiness.ts
+│   │   ├── engine.ts
+│   │   ├── ai.ts
+│   │   └── ratelimit.ts
+│   │
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── Dockerfile
+│   └── node_modules/            # (not committed)
+│
+├── dashboard/                   # React UI (Vite + Nginx static)
+│   ├── src/
+│   │   ├── App.tsx
+│   │   └── main.tsx
+│   │
+│   ├── public/
+│   ├── index.html
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   ├── .env                     # VITE_API_BASE
+│   ├── Dockerfile
+│   └── node_modules/            # (not committed)
+│
+├── charts/
+│   └── platform/                # Helm chart (deploys API + Dashboard)
+│       ├── Chart.yaml
+│       ├── values.yaml
+│       ├── values-local.yaml
+│       ├── values-prod.yaml
+│       │
+│       └── templates/
+│           ├── api-deployment.yaml
+│           ├── api-service.yaml
+│           ├── api-ingress.yaml
+│           ├── api-rbac.yaml
+│           ├── dashboard-deployment.yaml
+│           ├── dashboard-service.yaml
+│           ├── dashboard-ingress.yaml
+│           └── _helpers.tpl
+│
+├── scripts/
+│   ├── demo.sh
+│   ├── smoke.sh
+│   ├── video-run.sh
+│   ├── video-commands.sh
+│   ├── order-checklist.md
+│   └── k3s-install.sh
+│
+├── SYSTEM_DESIGN.md
+├── README.md
+└── .gitignore

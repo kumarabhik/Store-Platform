@@ -1,0 +1,20 @@
+global:
+  baseDomain: "your-vps-domain.com"
+  inressClassName: "nginx"
+  tls:
+    enabled: true
+    secretName: "wildcard-tls-secret"
+
+api: 
+  env:
+    BASE_DOMAIN: "your-real-domain.com"
+    INGRESS: "nginx"
+    STORE_CHART_REF: "bitnami/wordpress"
+  image: "ghcr.io/you/store-platform-api:0.1.0"
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: "local-path"
+
+dashboard:
+  image: "ghcr.io/you/store-platform-dashboard:0.1.0"

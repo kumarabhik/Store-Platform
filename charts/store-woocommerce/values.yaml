@@ -1,0 +1,4 @@
+ingress:
+  enabled: true
+  className: nginx
+  host: "store-demo.127.0.0.1.nip.io"

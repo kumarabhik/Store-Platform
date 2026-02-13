@@ -1,0 +1,26 @@
+global:
+  baseDomain: "127.0.0.1.nip.io"
+  ingressClassName: "nginx"
+  tls:
+    enabled: false
+    secretName: "tls-secret"
+
+api:
+  image: "store-platform/api-node:dev"
+  replicas: 1
+  resources: {}
+  env:
+    DB_PATH: "/data/platform.db"
+    BASE_DOMAIN: "127.0.0.1.nip.io"
+    INGRESS_CLASS_NAME: "nginx"
+    STORE_CHART_REF: "bitnami/wordpress"
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""
+
+dashboard:
+  image: "store-platform/dashboard:dev"
+  replicas: 1
+  resources: {}
+

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: store-woocommerce
+description: Per-store WooCommerce deployment (v1 placeholder)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

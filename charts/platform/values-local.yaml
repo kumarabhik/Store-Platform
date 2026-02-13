@@ -1,0 +1,20 @@
+global:
+  baseDomain: "192.168.49.2.nip.io"
+  ingressClassName: "nginx"
+
+api:
+  image: "store-platform/api-node:dev"
+  replicas: 1
+  env:
+    DB_PATH: "/data/platform.db"
+    BASE_DOMAIN: "192.168.49.2.nip.io"
+    INGRESS_CLASS_NAME: "nginx"
+    STORE_CHART_REF: "bitnami/wordpress"
+    MAX_STORES: "50"
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""
+
+dashboard:
+  enabled: false

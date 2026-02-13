@@ -1,0 +1,92 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "platform.apiName" . }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "platform.apiName" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "platform.apiName" . }}
+    spec:
+      serviceAccountName: {{ include "platform.apiName" . }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 10001
+        fsGroupChangePolicy: "OnRootMismatch"
+      containers:
+        - name: api
+          image: {{ .Values.api.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_PATH
+              value: {{ .Values.api.env.DB_PATH | quote }}
+            - name: BASE_DOMAIN
+              value: {{ .Values.api.env.BASE_DOMAIN | quote }}
+            - name: INGRESS_CLASS_NAME
+              value: {{ .Values.api.env.INGRESS_CLASS_NAME | quote }}
+            - name: STORE_CHART_REF
+              value: {{ .Values.api.env.STORE_CHART_REF | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          {{- if .Values.api.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "platform.apiName" . }}-pvc
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+
+---
+{{- if .Values.api.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "platform.apiName" . }}-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.api.persistence.size | quote }}
+  {{- if .Values.api.persistence.storageClassName }}
+  storageClassName: {{ .Values.api.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}
