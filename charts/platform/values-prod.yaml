@@ -1,15 +1,24 @@
 global:
   baseDomain: "your-vps-domain.com"
-  inressClassName: "nginx"
+  ingressClassName: "nginx"
   tls:
     enabled: true
     secretName: "wildcard-tls-secret"
 
-api: 
+api:
   env:
-    BASE_DOMAIN: "your-real-domain.com"
-    INGRESS: "nginx"
+    BASE_DOMAIN: "your-vps-domain.com"
+    INGRESS_CLASS_NAME: "nginx"
     STORE_CHART_REF: "bitnami/wordpress"
+    TRUST_PROXY: "true"
+    RATE_LIMIT_ENABLED: "true"
+    RATE_LIMIT_CAPACITY: "120"
+    RATE_LIMIT_REFILL_PER_SEC: "2"
+    RATE_LIMIT_TTL_SEC: "300"
+    RATE_LIMIT_MAX_KEYS: "50000"
+    CREATE_RATE_LIMIT_CAPACITY: "8"
+    CREATE_RATE_LIMIT_REFILL_PER_SEC: "0.1"
+    CREATE_RATE_LIMIT_TTL_SEC: "900"
   image: "ghcr.io/you/store-platform-api:0.1.0"
   persistence:
     enabled: true

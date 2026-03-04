@@ -1,10 +1,10 @@
 import subprocess
 from kubernetes import client, config
-from kubernetes.client.reset import ApiException
+from kubernetes.client.exceptions import ApiException
 
 def load_kube():
     try:
-        config.load_inclluster_config()
+        config.load_incluster_config()
     except config.ConfigException:
         config.load_kube_config()
         
@@ -26,7 +26,7 @@ def delete_namespace(name:str):
     except ApiException as e:
         if e.status != 404:
             raise
-def helm_install(release: str, chart_path: str, namespace: str, set_vs: dict[str, str]):
+def helm_install(release: str, chart_path: str, namespace: str, set_values: dict[str, str]):
     cmd = [
         "helm", "upgrade", "--install", release, chart_path,
         "--namespace", namespace,
@@ -34,7 +34,7 @@ def helm_install(release: str, chart_path: str, namespace: str, set_vs: dict[str
         "--wait",
         "--timeout", "10m",
     ]
-    for k, v in set_vs.items():
+    for k, v in set_values.items():
         cmd.extend(["--set", f"{k}={v}"])
         
     subprocess.check_call(cmd)

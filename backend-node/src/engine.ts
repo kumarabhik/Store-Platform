@@ -5,6 +5,7 @@ export function buildEngineValues(args: {
   ingressClassName: string;
   host: string;
   secretName: string;
+  chartRef?: string;
 }) {
   if (args.engine === "medusa") {
     return {
@@ -34,6 +35,18 @@ mariadb:
     persistence:
       enabled: true
       size: 5Gi
+    livenessProbe:
+      enabled: true
+      initialDelaySeconds: 180
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 6
+    readinessProbe:
+      enabled: true
+      initialDelaySeconds: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
 
 ingress:
   enabled: true
@@ -42,12 +55,22 @@ ingress:
   path: /
   tls: false
 
+service:
+  type: ClusterIP
+
+livenessProbe:
+  enabled: true
+  timeoutSeconds: 5
+readinessProbe:
+  enabled: true
+  timeoutSeconds: 5
+
 extraPlugins:
   - woocommerce
 `;
 
   return {
-    chartRef: "bitnami/wordpress",
+    chartRef: (args.chartRef ?? "").trim() || "bitnami/wordpress",
     valuesYaml,
     stubbed: false as const,
   };

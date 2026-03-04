@@ -4,6 +4,7 @@
   "type": "commonjs",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/server.js"
   },
   "dependencies": {

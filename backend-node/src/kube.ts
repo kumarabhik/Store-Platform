@@ -5,7 +5,12 @@ export type KubeClients = {
   batch: k8s.BatchV1Api;
   net: k8s.NetworkingV1Api;
   apps: k8s.AppsV1Api;
+  rbac: k8s.RbacAuthorizationV1Api;
 };
+
+function statusCodeOf(e: any): number | undefined {
+  return e?.statusCode ?? e?.response?.statusCode ?? e?.response?.status;
+}
 
 export function makeKubeClients(): KubeClients {
   const kc = new k8s.KubeConfig();
@@ -19,6 +24,7 @@ export function makeKubeClients(): KubeClients {
     batch: kc.makeApiClient(k8s.BatchV1Api),
     net: kc.makeApiClient(k8s.NetworkingV1Api),
     apps: kc.makeApiClient(k8s.AppsV1Api),
+    rbac: kc.makeApiClient(k8s.RbacAuthorizationV1Api),
   };
 }
 
@@ -27,7 +33,7 @@ export async function ensureNamespace(core: k8s.CoreV1Api, ns: string) {
     await core.readNamespace(ns);
     return;
   } catch (e: any) {
-    if (e?.response?.statusCode !== 404) throw e;
+    if (statusCodeOf(e) !== 404) throw e;
   }
   await core.createNamespace({ metadata: { name: ns } } as any);
 }
@@ -36,7 +42,7 @@ export async function deleteNamespace(core: k8s.CoreV1Api, ns: string) {
   try {
     await core.deleteNamespace(ns, undefined, undefined, 0);
   } catch (e: any) {
-    if (e?.response?.statusCode !== 404) throw e;
+    if (statusCodeOf(e) !== 404) throw e;
   }
 }
 
@@ -61,7 +67,7 @@ export async function applyResourceQuota(core: k8s.CoreV1Api, ns: string) {
   try {
     await core.replaceNamespacedResourceQuota(name, ns, body);
   } catch (e: any) {
-    if (e?.response?.statusCode !== 404) throw e;
+    if (statusCodeOf(e) !== 404) throw e;
     await core.createNamespacedResourceQuota(ns, body);
   }
 }
@@ -85,7 +91,7 @@ export async function applyLimitRange(core: k8s.CoreV1Api, ns: string) {
   try {
     await core.replaceNamespacedLimitRange(name, ns, body);
   } catch (e: any) {
-    if (e?.response?.statusCode !== 404) throw e;
+    if (statusCodeOf(e) !== 404) throw e;
     await core.createNamespacedLimitRange(ns, body);
   }
 }
@@ -99,10 +105,22 @@ export async function applyNetworkPolicy(net: k8s.NetworkingV1Api, ns: string) {
       policyTypes: ["Ingress", "Egress"],
       ingress: [
         {
+          from: [{ podSelector: {} }],
+        },
+        {
           from: [
             {
               namespaceSelector: {
                 matchLabels: { "kubernetes.io/metadata.name": "ingress-nginx" },
+              },
+            },
+          ],
+        },
+        {
+          from: [
+            {
+              namespaceSelector: {
+                matchLabels: { "kubernetes.io/metadata.name": "platform" },
               },
             },
           ],
@@ -119,6 +137,14 @@ export async function applyNetworkPolicy(net: k8s.NetworkingV1Api, ns: string) {
           ],
         },
         { to: [{ podSelector: {} }] },
+        {
+          to: [{ ipBlock: { cidr: "0.0.0.0/0" } }],
+          ports: [
+            { protocol: "TCP", port: 443 },
+            { protocol: "TCP", port: 53 },
+            { protocol: "UDP", port: 53 },
+          ] as any,
+        },
       ],
     },
   };
@@ -126,8 +152,39 @@ export async function applyNetworkPolicy(net: k8s.NetworkingV1Api, ns: string) {
   try {
     await net.replaceNamespacedNetworkPolicy(name, ns, body);
   } catch (e: any) {
-    if (e?.response?.statusCode !== 404) throw e;
+    if (statusCodeOf(e) !== 404) throw e;
     await net.createNamespacedNetworkPolicy(ns, body);
+  }
+}
+
+export async function ensureNamespaceHelmAccess(
+  rbac: k8s.RbacAuthorizationV1Api,
+  ns: string,
+  serviceAccountName = "default"
+) {
+  const name = "store-helm-admin";
+  const body: k8s.V1RoleBinding = {
+    metadata: { name },
+    roleRef: {
+      apiGroup: "rbac.authorization.k8s.io",
+      kind: "ClusterRole",
+      name: "admin",
+    },
+    subjects: [
+      {
+        kind: "ServiceAccount",
+        name: serviceAccountName,
+        namespace: ns,
+      },
+    ],
+  };
+
+  try {
+    await rbac.replaceNamespacedRoleBinding(name, ns, body);
+  } catch (e: any) {
+    const code = e?.statusCode ?? e?.response?.statusCode ?? e?.response?.status;
+    if (code !== 404) throw e;
+    await rbac.createNamespacedRoleBinding(ns, body);
   }
 }
 
@@ -136,7 +193,7 @@ async function deleteJobIfExists(batch: k8s.BatchV1Api, ns: string, jobName: str
     await batch.readNamespacedJob(jobName, ns);
     await batch.deleteNamespacedJob(jobName, ns, undefined, undefined, 0, undefined, "Foreground");
   } catch (e: any) {
-    if (e?.response?.statusCode !== 404) throw e;
+    if (statusCodeOf(e) !== 404) throw e;
   }
 }
 
@@ -162,9 +219,8 @@ export async function applyHelmJob(
                 [
                   "set -euo pipefail",
                   "helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true",
-                  "helm repo update >/dev/null 2>&1 || true",
                   "cat > /tmp/values.yaml <<'YAML'\n" + helmArgs.valuesYaml + "\nYAML",
-                  `helm upgrade --install ${helmArgs.release} ${helmArgs.chartRef} -n ${ns} --create-namespace --wait --timeout 10m -f /tmp/values.yaml`,
+                  `helm upgrade --install ${helmArgs.release} ${helmArgs.chartRef} -n ${ns} -f /tmp/values.yaml`,
                 ].join("\n"),
               ],
             },
@@ -200,7 +256,6 @@ export async function applyHelmUninstallJob(
                 [
                   "set -euo pipefail",
                   "helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true",
-                  "helm repo update >/dev/null 2>&1 || true",
                   `helm uninstall ${args.release} -n ${ns} || true`,
                 ].join("\n"),
               ],
@@ -246,6 +301,20 @@ export async function waitForAnyDeploymentAvailable(
       (d.status?.conditions ?? []).some((c: any) => c.type === "Available" && c.status === "True")
     );
     if (ok) return true;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
+export async function waitForDeploymentAvailable(apps: any, ns: string, name: string, timeoutMs: number) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await apps.readNamespacedDeployment(name, ns);
+      const conditions = (res as any).body?.status?.conditions ?? [];
+      const ok = conditions.some((c: any) => c.type === "Available" && c.status === "True");
+      if (ok) return true;
+    } catch {}
     await new Promise((r) => setTimeout(r, 2000));
   }
   return false;
