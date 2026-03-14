@@ -18,6 +18,18 @@ rules:
     resources: ["resourcequotas", "limitranges", "secrets"]
     verbs: ["get", "create", "patch", "update"]
 
+  - apiGroups: [""]
+    resources: ["pods", "services", "persistentvolumeclaims"]
+    verbs: ["list"]
+
+  - apiGroups: [""]
+    resources: ["pods", "services", "persistentvolumeclaims"]
+    verbs: ["get"]
+
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
 
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]

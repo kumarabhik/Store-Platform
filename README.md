@@ -83,6 +83,33 @@ If you run in a remote IDE/codespace, forward both ports:
 - `5173` (dashboard)
 - `8080` (API)
 
+## 4.1 Local env for API features
+
+For local development, put backend secrets and overrides in the repo root `.env.local`.
+
+Example:
+
+```powershell
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PRICE_ID=price_...
+STRIPE_PLAN_LABEL=Growth
+ADMIN_EMAILS=you@example.com
+```
+
+Then rerun either:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ops\up.ps1
+```
+
+or:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ops\resume.ps1
+```
+
+The scripts now read the root `.env.local` automatically and apply those values to the API deployment. Do not put `STRIPE_SECRET_KEY` in `dashboard/.env` or `dashboard/.env.local`.
+
 ## 5. CLI create/verify flow (for interview backup)
 
 API health:

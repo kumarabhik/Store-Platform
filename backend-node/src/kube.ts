@@ -270,6 +270,55 @@ export async function applyHelmUninstallJob(
   await batch.createNamespacedJob(ns, body);
 }
 
+export async function applyMysqlBackupJob(
+  batch: k8s.BatchV1Api,
+  ns: string,
+  jobName: string,
+  args: { release: string; secretName: string }
+) {
+  const body: k8s.V1Job = {
+    metadata: { name: jobName },
+    spec: {
+      backoffLimit: 0,
+      template: {
+        metadata: {
+          labels: { "job-name": jobName },
+        },
+        spec: {
+          restartPolicy: "Never",
+          containers: [
+            {
+              name: "backup",
+              image: "bitnami/mariadb:11.4.8-debian-12-r1",
+              command: ["bash", "-lc"],
+              args: [
+                [
+                  "set -euo pipefail",
+                  `mysqldump --host=${args.release}-mariadb --user=root --password=\"$MARIADB_ROOT_PASSWORD\" --databases bitnami_wordpress --single-transaction --quick | gzip -9 | base64 | tr -d '\\n'`,
+                ].join("\n"),
+              ],
+              env: [
+                {
+                  name: "MARIADB_ROOT_PASSWORD",
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: args.secretName,
+                      key: "mariadb_root_password",
+                    },
+                  },
+                },
+              ] as any,
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  await deleteJobIfExists(batch, ns, jobName);
+  await batch.createNamespacedJob(ns, body);
+}
+
 export async function waitForJob(
   batch: k8s.BatchV1Api,
   ns: string,
@@ -318,4 +367,29 @@ export async function waitForDeploymentAvailable(apps: any, ns: string, name: st
     await new Promise((r) => setTimeout(r, 2000));
   }
   return false;
+}
+
+export async function findJobPodName(core: k8s.CoreV1Api, ns: string, jobName: string) {
+  const list = await core.listNamespacedPod(ns, undefined, undefined, undefined, undefined, `job-name=${jobName}`);
+  const pods = (list as any).body?.items ?? [];
+  const pod = pods[0];
+  return pod?.metadata?.name ?? null;
+}
+
+export async function readPodLogs(core: k8s.CoreV1Api, ns: string, podName: string, container = "backup") {
+  const response = await (core as any).readNamespacedPodLog(
+    podName,
+    ns,
+    container,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false
+  );
+
+  return typeof response === "string" ? response : response?.body ?? "";
 }

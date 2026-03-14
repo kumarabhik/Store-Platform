@@ -1,3 +1,4 @@
+import * as dns from "node:dns/promises";
 import type { Db } from "./db";
 import { addEvent } from "./db";
 import type { KubeClients } from "./kube";
@@ -76,8 +77,25 @@ type Config = {
 type StoreRow = {
   id: string;
   namespace: string;
+  custom_domain?: string | null;
   status: "Provisioning" | "Deleting" | string;
 };
+
+async function resolveDomainStatus(domain: string, targetHost: string) {
+  try {
+    const cname = await dns.resolveCname(domain);
+    if (cname.some((value) => value.replace(/\.$/, "") === targetHost.replace(/\.$/, ""))) {
+      return "Verified";
+    }
+  } catch {}
+
+  try {
+    const records = await dns.lookup(domain, { all: true });
+    if (records.length > 0) return "Configured";
+  } catch {}
+
+  return "Awaiting DNS";
+}
 
 export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => void {
   const tickMs = 2000;
@@ -151,7 +169,9 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
       const ns = row.namespace as string;
 
       try {
-        const host = `store-${storeId}.${cfg.baseDomain}`;
+        const defaultHost = `store-${storeId}.${cfg.baseDomain}`;
+        const customDomain = String(row.custom_domain ?? "").trim();
+        const host = customDomain || defaultHost;
         const url = `http://${host}`;
 
         addEvent(db, storeId, "reconcile_start", `ns=${ns} host=${host}`);
@@ -229,11 +249,13 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
         const reachable = await waitForHttp(serviceUrl, 5 * 60 * 1000);
         if (!reachable) throw new Error("store service not reachable yet");
 
+        const domainStatus = customDomain ? await resolveDomainStatus(customDomain, defaultHost) : "Platform subdomain";
+
         db.prepare(
           `update stores
-           set status='Ready', url=?, updated_at=datetime('now'), last_error=null
+           set status='Ready', url=?, domain_status=?, domain_last_error=null, updated_at=datetime('now'), last_error=null
            where id=?`
-        ).run(url, storeId);
+        ).run(url, domainStatus, storeId);
 
         addEvent(db, storeId, "ready", url);
         releaseLease(db, storeId);
@@ -266,9 +288,12 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
 
         db.prepare(
           `update stores
-           set status='Failed', last_error=?, updated_at=datetime('now')
+           set status='Failed',
+               last_error=?,
+               domain_last_error=case when custom_domain is not null and trim(custom_domain) <> '' then ? else domain_last_error end,
+               updated_at=datetime('now')
            where id=?`
-        ).run(msg, storeId);
+        ).run(msg, msg, storeId);
 
         addEvent(db, storeId, "failed", msg);
         releaseLease(db, storeId);
