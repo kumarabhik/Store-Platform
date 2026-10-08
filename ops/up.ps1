@@ -53,7 +53,8 @@ function Ensure-Minikube {
 
   if ($status -notmatch 'Running\|Running\|Running') {
     Write-Host "Starting Minikube..."
-    minikube start | Out-Host
+    # Calico: the default minikube CNI silently ignores NetworkPolicies (SYSTEM.md L15).
+    minikube start --cni=calico | Out-Host
   } else {
     Write-Host "Minikube already running."
   }
@@ -178,11 +179,13 @@ function Start-LocalDev {
 Use-PreferredNode
 Ensure-Minikube
 Deploy-Platform
+Install-DefaultStore
 Start-LocalDev
 
 Write-Host ""
 Write-Host "Up complete."
 Write-Host "Dashboard: http://127.0.0.1:5173"
 Write-Host "API:       http://127.0.0.1:8080/healthz"
+Write-Host "Store:     http://store.127.0.0.1.nip.io:8088  (admin: /wp-admin, user 'admin')"
 Write-Host "Stores:    http://store-<id>.127.0.0.1.nip.io:8088"
 Write-Host "Stop all:  powershell -ExecutionPolicy Bypass -File .\\ops\\down.ps1"

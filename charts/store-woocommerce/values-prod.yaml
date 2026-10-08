@@ -1,0 +1,26 @@
+# k3s VPS. Replace example.com with your domain (wildcard A record *.example.com -> VPS IP).
+publicUrl: "https://store.example.com"
+
+ingress:
+  className: traefik              # built into k3s; ingress-nginx is end-of-life (SYSTEM.md G6)
+  host: store.example.com
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: true
+
+site:
+  title: "Urumi Demo Store"
+  adminEmail: admin@example.com
+
+# Create before installing (keys: mariadb-root-password, mariadb-password, wordpress-admin-password,
+# woo-consumer-key, woo-consumer-secret, mcp-token), e.g. with kubectl or SealedSecrets.
+existingSecret: store-default-credentials
+
+storageClassName: local-path
+
+woocommerce:
+  version: ""                     # pin to the version you tested locally before going live
+
+networkPolicy:
+  ingressControllerNamespace: kube-system   # Traefik runs in kube-system on k3s

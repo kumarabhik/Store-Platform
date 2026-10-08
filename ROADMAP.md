@@ -15,8 +15,8 @@ Last reviewed: 2026-10-09
 ## Progress at a glance
 | Phase | Scope | Status |
 |---|---|---|
-| P0 | Repo cleanup and baseline | `[~]` |
-| P1 | Store chart (own) + default store | `[~]` |
+| P0 | Repo cleanup and baseline | `[x]` |
+| P1 | Store chart (own) + default store | `[x]` |
 | P2 | WooCommerce MCP server | `[ ]` |
 | P3 | Gateway core + `/mcp` endpoint | `[ ]` |
 | P4 | Two more upstream MCP servers | `[ ]` |
@@ -36,23 +36,26 @@ Last reviewed: 2026-10-09
 - [x] Remove leftovers: `ForceDLT.txt`, `ns.json`, `tmp-store-ingress-patch.json`, `outputs/` (notes moved to SYSTEM.md L8/L9). Proof: commit `9b1ed9b`
 - [x] Delete legacy Python `backend/` (still in git history). Proof: commit `f22cd07`
 - [x] Put Stripe billing, custom domains, backups, content suggestions and Medusa behind `FEATURE_LEGACY_SAAS` (default `false`; routes return 404 `feature_disabled`; dashboard reads `GET /config` and hides the panels; code kept). Proof: `npm run check` ✓, dashboard `build` + `lint` ✓, gate verified with `app.inject()` on Fastify 4.29.1 (both flag values). Not yet run in-cluster
-- [ ] Make backend tests runnable (in the Node 20 container, or with a host rebuild of `better-sqlite3`; SYSTEM.md L13)
-- [ ] Move `STRIPE_*`, `GROQ_API_KEY` and `ADMIN_API_KEY` out of plain Helm `env` into Secrets (they are currently plain env in `values*.yaml`)
-- [ ] Remove the Loom link appended to `.env.example`
-- [ ] Add `backend-node` test runner (`vitest` or `node --test`) and a `npm test` script
+- [~] Make backend tests runnable: pure tests run on the host (`npm test`); tests that open SQLite still need the Node 20 container or a host rebuild of `better-sqlite3` (SYSTEM.md L13)
+- [x] Move credentials out of plain Helm `env` into Secret `platform-api-env` (`envFrom` + checksum restart; SYSTEM.md L16). Proof: `kubectl get deploy platform-api` env has no `GROQ_API_KEY`/`STRIPE_SECRET_KEY`; `printenv` in the pod shows both
+- [x] Remove the Loom link appended to `.env.example` (reverted, never committed)
+- [x] Add `backend-node` test runner: vitest, `npm test`, 7 tests (legacy gate via `app.inject`, rate limiter)
+- [x] Local cluster enforces NetworkPolicies (`minikube start --cni=calico` in ops scripts; SYSTEM.md L15). Proof: `scripts/verify-store-isolation.sh`
+- [x] `.gitattributes` forces LF for scripts/charts that run in Linux containers
+- [x] Fix `ops/resume.ps1` assigning the read-only `$pid` variable (stale processes were never stopped)
 - [x] AGENTS.md / DESIGN.md / ROADMAP.md / SYSTEM.md created
 
 ## P1 — Store (DESIGN §7.2)
 - [x] WooCommerce store provisioned on Kubernetes via Helm Job (`bitnami/wordpress` + `extraPlugins: woocommerce`) — existing reconciler
 - [x] MariaDB + WordPress use PVCs (`engine.ts` persistence 2Gi/5Gi)
 - [x] Per-store secrets are stable across retries (`secrets.ts`)
-- [~] Storefront exposed through Ingress with a stable URL. Works as `store-<id>.127.0.0.1.nip.io:8088` via port-forward; needs a fixed name for the default store
-- [ ] **Decide image source**: own chart with official `wordpress` + `mariadb` images (recommended) vs `bitnamilegacy/*` stopgap. See SYSTEM.md §Bitnami
-- [ ] Write `charts/store-woocommerce` (currently an empty placeholder): mariadb StatefulSet, wordpress Deployment, PVCs, Secrets with `lookup`, Ingress, probes, resources
-- [ ] `store-init` Job (post-install/upgrade hook, idempotent): WP install, WooCommerce activate, currency, **COD enabled**, insert REST API key, seed 3 products
-- [ ] Default store installed by Helm as release `store-default` in namespace `store-default` (not only by clicking in the dashboard)
-- [ ] Verify: storefront → add to cart → checkout with COD → order visible in WC admin (record in `scripts/order-checklist.md`)
-- [ ] Verify persistence: delete wordpress + mariadb pods → products/orders still there
+- [x] Storefront exposed through Ingress with a stable URL: `http://store.127.0.0.1.nip.io:8088` (default store)
+- [x] **Image source decided**: own chart with official images `wordpress:7.1.3-php8.3-apache`, `wordpress:cli-2.12.0-php8.3`, `mariadb:11.4.13` (SYSTEM.md G1)
+- [x] `charts/store-woocommerce`: mariadb StatefulSet (uid 999), wordpress Deployment (uid 33, sysctl for :80, volume-permissions init with CHOWN only), PVCs, Secret persisted with `lookup` + `resource-policy: keep`, Ingress, startup/readiness/liveness probes, requests/limits, NetworkPolicies. Proof: `helm lint` + `helm template` for local and prod values; fresh install 0 restarts
+- [x] `store-init` hook Job (idempotent): WP install, WooCommerce 11.2.0, INR, timezone, coming-soon off, shipping off, **COD enabled**, pages, REST API key upsert, 3 seed products. Proof: `helm upgrade` rerun → "already installed", key "up to date", still 3 products, credentials hash unchanged
+- [x] Default store installed by Helm as release `store-default` in namespace `store-default` from `ops/up.ps1` (always) and `ops/resume.ps1` (if missing)
+- [x] Verify: storefront → add to cart → checkout with COD → order in WooCommerce. Proof: `scripts/verify-store.sh` (Store API checkout → order `processing cod 199.00 INR`). Manual browser run-through still to do before the demo (`scripts/order-checklist.md`)
+- [x] Verify persistence: delete wordpress + mariadb pods → order and 3 products still there. Proof: `scripts/verify-store.sh --persistence`
 
 ## P2 — WooCommerce MCP server (DESIGN §7.1)
 - [ ] Scaffold `mcp-servers/woo-mcp` (TS, `@modelcontextprotocol/sdk`, zod, Streamable HTTP, stateless)
@@ -137,7 +140,7 @@ Last reviewed: 2026-10-09
 - [ ] Dashboard served in-cluster behind Ingress at `dashboard.<domain>`; API under `/api`, gateway under `/mcp` (same origin → no CORS)
 - [ ] Every workload has readiness + liveness + requests/limits (checklist table in DESIGN §10.2)
 - [ ] All credentials in Secrets; `existingSecret` support for prod; chart-generated with `lookup` for local
-- [ ] Default-deny NetworkPolicies in `platform`, `mcp-servers`, `store-default`
+- [~] NetworkPolicies: store-default has ingress policies for mariadb and wordpress (proven by `scripts/verify-store-isolation.sh`). Still to do: default-deny in `platform`, `mcp-servers`, `store-default` incl. egress
 - [ ] `automountServiceAccountToken: false` on all pods that don't need it
 - [ ] `ops/up.ps1` installs all three releases in order; `scripts/deploy.sh` for VPS
 - [ ] `helm lint` + `helm template` pass for local and prod values
@@ -200,7 +203,7 @@ Last reviewed: 2026-10-09
 - [ ] SSRF guard (P3)
 - [ ] Upstream credentials encrypted at rest (P3)
 - [ ] Default-deny NetworkPolicies everywhere (P8)
-- [~] Non-root: API yes; dashboard nginx no; store pods TBD
+- [~] Non-root: API yes; store pods yes (WordPress 33, MariaDB 999, WP-CLI 33; only the CHOWN init container runs as root); dashboard nginx no
 - [ ] Tool-definition pinning / rug-pull detection
 - [ ] Narrow `store-installer` role instead of binding `admin` in store namespaces
 ### S7 Scaling

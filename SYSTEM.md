@@ -103,6 +103,22 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Fix:** `minikube delete` (cleans the stale profile), then start fresh. `~\.minikube\cache` survives, so the restart reuses the cached kicbase and preload (~1.2 GB) instead of downloading. Full rebuild with `ops/up.ps1` took about 10 minutes.
 - **Also:** minikube can't change CPU/memory of an existing cluster; set them once with `minikube config set memory 8192` / `cpus 4` before `minikube start`. Docker Desktop's memory is limited by `%USERPROFILE%\.wslconfig` (`[wsl2] memory=10GB`) then `wsl --shutdown`. This machine: 15.4 GB RAM → WSL 10 GB → minikube 8 GB.
 
+### L15 — NetworkPolicies do nothing on minikube's default network plugin
+- **Symptom:** none, which is the danger. Policies apply without error, but every pod can still reach every other pod.
+- **Cause:** the default minikube CNI (bridge) does not implement NetworkPolicy. `kubectl -n kube-system get pods` shows no calico/cilium pods.
+- **Fix:** `minikube start --cni=calico` (now in `ops/up.ps1` and `ops/resume.ps1`). The CNI can only be chosen when the cluster is created, so an existing cluster must be deleted first. k3s ships with flannel + its own network-policy controller, so policies work there out of the box.
+- **Carry forward:** always *prove* a policy with a negative test (a pod that should be blocked gets a timeout), never just `kubectl get networkpolicy`.
+
+### L16 — Ops scripts used to put credentials into the Deployment as plain env
+- **Symptom:** `kubectl -n platform get deploy platform-api -o yaml` showed `STRIPE_SECRET_KEY` and `GROQ_API_KEY` values.
+- **Cause:** `ops/platform-env.ps1` copied every key from `.env.local` into the Helm override file under `api.env`.
+- **Fix:** keys matching `*KEY|*TOKEN|*PASSWORD|*SECRET*` go into Secret `platform-api-env` (through a temp file that is deleted right after), and the pod reads it with `envFrom`. **An explicit `env:` entry beats `envFrom`**, so secret keys must never also appear in `api.env` values (an empty `STRIPE_SECRET_KEY: ""` would blank the real one). A checksum annotation restarts the pod when the Secret changes.
+
+### L17 — Non-root WordPress restarts once on a fresh volume (`tar: .: Cannot change mode`)
+- **Symptom:** on first install the wordpress container exits with code 2 and restarts once. Previous log: `WordPress not found in /var/www/html - copying now...` then `tar: .: Cannot change mode to rwxrwxrwx: Operation not permitted`.
+- **Cause:** hostPath-backed provisioners (minikube-hostpath, k3s local-path) ignore `fsGroup`, so the volume root stays owned by root. Running as uid 33, the image's first-start `tar` copies every file but cannot chmod the root dir, and exits non-zero. On restart the files exist, so it skips the copy and works. MariaDB (uid 999) is not affected.
+- **Fix:** `volume-permissions` init container: runs as root with **only** the `CHOWN` capability, chowns just the mount root (not recursive), and only if it isn't already uid 33 (`wordpress.volumePermissions.enabled`, default true). After the fix: fresh install with 0 restarts.
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)
@@ -148,10 +164,23 @@ Git on Windows warns `LF will be replaced by CRLF`. A `.sh` with CRLF fails on L
 - **Fix:** add `.gitattributes` with `*.sh text eol=lf`, `*.yaml text eol=lf`, `*.tpl text eol=lf`, `Dockerfile text eol=lf`.
 
 ### G11 — Windows PowerShell 5.1 quirks (for humans and agents running commands)
-No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`. `Set-Content` writes ANSI by default, so pass `-Encoding utf8`. Run scripts with `powershell -ExecutionPolicy Bypass -File …`.
+No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`. In scripts with `$ErrorActionPreference = "Stop"`, **any stderr from a native command (kubectl, helm) aborts the script, even with `2>$null`**. Probe with commands that don't error (list and filter) instead of `kubectl get <missing-thing>`. `Set-Content` writes ANSI by default, so pass `-Encoding utf8`. Run scripts with `powershell -ExecutionPolicy Bypass -File …`.
 
 ### G12 — nip.io needs internet DNS
 `*.127.0.0.1.nip.io` resolves via public DNS. When offline, or behind DNS that blocks rebinding (some routers, corporate DNS), it fails. Fallback: add hosts-file entries for `dashboard.local.test`, `store.local.test` and switch `baseDomain` in values.
+
+### G13 — New WooCommerce stores are hidden ("coming soon") and can't check out without shipping
+- WooCommerce 9.x+ starts new stores in **coming soon** mode, so visitors see a placeholder instead of the shop. `store-init` sets `woocommerce_coming_soon=no` and `woocommerce_store_pages_only=no`.
+- With no shipping zones, physical products fail checkout ("no shipping options"). `store-init` sets `woocommerce_ship_to_countries=disabled`; add a zone instead if you want to demo shipping.
+- The onboarding wizard is skipped (`woocommerce_onboarding_profile={"skipped":true}`), and shop/cart/checkout pages are created with `wp wc tool run install_pages`.
+
+### G14 — Store chart conventions that are easy to break
+- `store-init` is a **Helm hook Job** (`post-install,post-upgrade`, `before-hook-creation`). A plain Job breaks `helm upgrade` because Job specs are immutable.
+- The init Job mounts the **same RWO PVC** as WordPress (it needs the same `wp-config.php`). That works because both pods land on the same node (single-node minikube; on k3s the local-path PV pins them to its node). On a multi-node cluster with network storage this would need RWX or a different approach.
+- Credentials Secret and WordPress PVC carry `helm.sh/resource-policy: keep`, so `helm uninstall` + reinstall keeps passwords that match the retained MariaDB volume (L4). To really wipe a store, delete the namespace.
+- WordPress runs as uid 33 and binds :80 thanks to the safe sysctl `net.ipv4.ip_unprivileged_port_start=0`. MariaDB runs as uid 999.
+- `sendmail: can't connect to remote host` in the init log is expected: WordPress tries to send a notification email and the cluster has no mail server. Harmless.
+- Verify a store with `bash scripts/verify-store.sh [--persistence]` and its isolation with `bash scripts/verify-store-isolation.sh`.
 
 ---
 
@@ -169,7 +198,9 @@ No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`.
 | Max tool result size | 256 KB | DESIGN §6.4 |
 | API key format | `mcpgw_<8>_<43>` | DESIGN §8.2 |
 | Max stores (default / local) | 3 / 50 | values*.yaml |
-| Local URLs | dashboard `http://127.0.0.1:5173` (dev), stores `http://store-<id>.127.0.0.1.nip.io:8088`, API `http://127.0.0.1:8080` | ops/up.ps1 |
+| Local URLs | dashboard `http://127.0.0.1:5173` (dev), default store `http://store.127.0.0.1.nip.io:8088`, provisioned stores `http://store-<id>.127.0.0.1.nip.io:8088`, API `http://127.0.0.1:8080` | ops/up.ps1 |
+| Default store | release/namespace `store-default`; images `wordpress:7.1.3-php8.3-apache`, `wordpress:cli-2.12.0-php8.3`, `mariadb:11.4.13`; WooCommerce 11.2.0 (latest at install, unpinned) | charts/store-woocommerce |
+| Store install time | ~1 min with cached images; first pull ~5 min | measured 2026-10-09 |
 
 ---
 

@@ -1,4 +1,68 @@
+# One WooCommerce store. Environment differences go in values-local.yaml / values-prod.yaml only.
+
+# URL customers use. Written to WordPress siteurl/home by the init job.
+publicUrl: "http://store.example.com"
+
 ingress:
   enabled: true
   className: nginx
-  host: "store-demo.127.0.0.1.nip.io"
+  host: store.example.com
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+site:
+  title: "Demo Store"
+  adminUser: admin
+  adminEmail: admin@example.com
+  timezone: "Asia/Kolkata"      # "orders today" is evaluated in this timezone (SYSTEM.md G8)
+  currency: INR
+  defaultCountry: "IN:KA"
+  seedProducts: true
+
+woocommerce:
+  version: ""                   # empty = latest from wordpress.org; pin for reproducible installs
+
+images:
+  wordpress: wordpress:7.1.3-php8.3-apache
+  wpcli: wordpress:cli-2.12.0-php8.3
+  mariadb: mariadb:11.4.13
+  pullPolicy: IfNotPresent
+
+# Name of an existing Secret with the keys listed in templates/secret.yaml.
+# Empty: the chart generates the credentials once and keeps them across upgrades (lookup).
+existingSecret: ""
+
+storageClassName: ""            # empty = cluster default
+
+mariadb:
+  database: wordpress
+  user: wordpress
+  persistence:
+    size: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+wordpress:
+  persistence:
+    size: 2Gi
+  # Needed on hostPath-style storage (minikube, k3s local-path). Off for CSI drivers that honor fsGroup.
+  volumePermissions:
+    enabled: true
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 768Mi }
+
+init:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+networkPolicy:
+  enabled: true
+  # Namespace of the ingress controller pods (ingress-nginx locally, kube-system for Traefik on k3s).
+  ingressControllerNamespace: ingress-nginx
+  # Namespace of the platform API (gateway + provisioner readiness checks).
+  platformNamespace: platform

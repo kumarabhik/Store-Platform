@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "store.fullname" . }}-init
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+data:
+  init.sh: |
+    {{- .Files.Get "files/init.sh" | nindent 4 }}
+  api-key.php: |
+    {{- .Files.Get "files/api-key.php" | nindent 4 }}
+---
+# A hook, not a plain Job: Job specs are immutable, so a plain Job would break `helm upgrade`.
+# before-hook-creation replaces the previous run; a finished run stays around for `kubectl logs`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "store.fullname" . }}-init
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 1500
+  template:
+    metadata:
+      labels:
+        {{- include "store.selectorLabels" (dict "ctx" . "component" "init") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "store.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: wp-cli
+          image: {{ .Values.images.wpcli }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          securityContext:
+            {{- include "store.containerSecurityContext" . | nindent 12 }}
+          command: ["/bin/sh", "/init/init.sh"]
+          env:
+            {{- include "store.wordpressDbEnv" . | nindent 12 }}
+            - name: HOME
+              value: /tmp              # WP-CLI cache; the image's default HOME is not writable as uid 33
+            - name: STORE_URL
+              value: {{ .Values.publicUrl | quote }}
+            - name: SITE_TITLE
+              value: {{ .Values.site.title | quote }}
+            - name: ADMIN_USER
+              value: {{ .Values.site.adminUser | quote }}
+            - name: ADMIN_EMAIL
+              value: {{ .Values.site.adminEmail | quote }}
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: wordpress-admin-password
+            - name: WOO_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: woo-consumer-key
+            - name: WOO_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: woo-consumer-secret
+            - name: TIMEZONE
+              value: {{ .Values.site.timezone | quote }}
+            - name: CURRENCY
+              value: {{ .Values.site.currency | quote }}
+            - name: DEFAULT_COUNTRY
+              value: {{ .Values.site.defaultCountry | quote }}
+            - name: SEED_PRODUCTS
+              value: {{ .Values.site.seedProducts | quote }}
+            - name: WC_VERSION
+              value: {{ .Values.woocommerce.version | quote }}
+          resources:
+            {{- toYaml .Values.init.resources | nindent 12 }}
+          volumeMounts:
+            - name: html
+              mountPath: /var/www/html
+            - name: init
+              mountPath: /init
+              readOnly: true
+      volumes:
+        - name: html
+          persistentVolumeClaim:
+            claimName: {{ include "store.fullname" . }}-wordpress
+        - name: init
+          configMap:
+            name: {{ include "store.fullname" . }}-init

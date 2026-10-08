@@ -1,0 +1,52 @@
+{{- if .Values.networkPolicy.enabled }}
+# The database is reachable only by this store's WordPress and init job: no other store,
+# no MCP server, not the platform.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-mariadb
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" . "component" "mariadb") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" (dict "ctx" . "component" "wordpress") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" (dict "ctx" . "component" "init") | nindent 14 }}
+      ports:
+        - port: 3306
+          protocol: TCP
+---
+# WordPress is reachable from the ingress controller (public storefront), from pods in this
+# namespace (the store's MCP server), and from the platform API. Other stores cannot reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-wordpress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" . "component" "wordpress") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.platformNamespace }}
+        - podSelector: {}
+      ports:
+        - port: 80
+          protocol: TCP
+{{- end }}

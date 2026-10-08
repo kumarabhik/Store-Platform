@@ -1,0 +1,14 @@
+# minikube on Windows: ingress-nginx is reached through `kubectl port-forward ... 8088:80`,
+# so the public URL carries :8088 (SYSTEM.md L5). nip.io resolves *.127.0.0.1.nip.io to 127.0.0.1.
+publicUrl: "http://store.127.0.0.1.nip.io:8088"
+
+ingress:
+  className: nginx
+  host: store.127.0.0.1.nip.io
+
+site:
+  title: "Urumi Demo Store"
+  adminEmail: admin@store.127.0.0.1.nip.io
+
+networkPolicy:
+  ingressControllerNamespace: ingress-nginx

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: store-woocommerce
-description: Per-store WooCommerce deployment (v1 placeholder)
+description: One WooCommerce store (WordPress + MariaDB) with persistent storage, initialized by a WP-CLI job.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "7.1.3"

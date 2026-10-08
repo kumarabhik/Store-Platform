@@ -46,7 +46,7 @@ function Ensure-MinikubeRunning {
 
   if ($status -notmatch 'Running\|Running\|Running') {
     Write-Host "Minikube not running. Starting it..."
-    minikube start | Out-Host
+    minikube start --cni=calico | Out-Host
     minikube addons enable ingress | Out-Host
   }
 
@@ -138,9 +138,9 @@ function Stop-StaleLocalProcesses {
   if (Test-Path $pidFile) {
     try {
       $state = Get-Content $pidFile -Raw | ConvertFrom-Json
-      foreach ($pid in @($state.portForwardPid, $state.ingressPortForwardPid, $state.dashboardPid)) {
-        if ($pid -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
-          Stop-Process -Id $pid -Force
+      foreach ($procId in @($state.portForwardPid, $state.ingressPortForwardPid, $state.dashboardPid)) {
+        if ($procId -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+          Stop-Process -Id $procId -Force
         }
       }
     } catch {
@@ -194,6 +194,7 @@ Use-PreferredNode
 Ensure-MinikubeRunning
 Ensure-PlatformPresent
 Apply-PlatformConfig
+Install-DefaultStore -OnlyIfMissing
 Stop-StaleLocalProcesses
 Start-LocalDev
 
@@ -201,4 +202,5 @@ Write-Host ""
 Write-Host "Resume complete."
 Write-Host "Dashboard: http://127.0.0.1:5173"
 Write-Host "API:       http://127.0.0.1:8080/healthz"
+Write-Host "Store:     http://store.127.0.0.1.nip.io:8088  (admin: /wp-admin, user 'admin')"
 Write-Host "Stores:    http://store-<id>.127.0.0.1.nip.io:8088"

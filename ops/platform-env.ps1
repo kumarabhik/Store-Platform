@@ -74,8 +74,10 @@ function Sync-PlatformApiSecret {
     if ((Test-SecretEnvKey -Name $key) -and $repoEnv[$key]) { $lines += "$key=$($repoEnv[$key])" }
   }
 
-  kubectl get namespace $Namespace -o name 2>$null | Out-Null
-  if ($LASTEXITCODE -ne 0) { kubectl create namespace $Namespace | Out-Null }
+  # List instead of `get <name>`: under $ErrorActionPreference=Stop, PowerShell 5.1 turns a native
+  # command's stderr ("NotFound") into a terminating error even with 2>$null (SYSTEM.md G11).
+  $existing = kubectl get namespaces -o name | Where-Object { $_ -eq "namespace/$Namespace" }
+  if (-not $existing) { kubectl create namespace $Namespace | Out-Null }
 
   $envFile = Join-Path $StateDir "platform-api-env.tmp"
   try {
@@ -90,6 +92,28 @@ function Sync-PlatformApiSecret {
   $sha = [System.Security.Cryptography.SHA256]::Create()
   $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
   return (([System.BitConverter]::ToString($hash)) -replace '-', '').ToLowerInvariant()
+}
+
+# The demo store every installation starts with (DESIGN.md §7.2). Same chart the provisioner will use.
+function Install-DefaultStore {
+  param(
+    [switch]$OnlyIfMissing
+  )
+
+  if ($OnlyIfMissing) {
+    $release = helm ls -n store-default -q | Where-Object { $_ -eq 'store-default' }
+    if ($release) {
+      Write-Host "Default store already installed."
+      return
+    }
+  }
+
+  Write-Host "Installing/upgrading default store (first install pulls images and WooCommerce; ~5-10 min)..."
+  helm upgrade --install store-default ./charts/store-woocommerce -n store-default --create-namespace `
+    -f ./charts/store-woocommerce/values-local.yaml --wait --timeout 20m | Out-Host
+  if ($LASTEXITCODE -ne 0) {
+    throw "Default store install failed. Inspect: kubectl -n store-default get pods; kubectl -n store-default logs job/store-default-init"
+  }
 }
 
 function Write-PlatformEnvOverrideFile {
