@@ -93,8 +93,15 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 ### L13 — The API doesn't start on the host Node version (`better-sqlite3` native binding)
 - **Symptom:** `node dist/server.js` on the dev machine crashes in `openDb` with `ERR_DLOPEN_FAILED` from `better-sqlite3/lib/database.js`.
 - **Cause:** `better-sqlite3` is a native addon compiled for one Node ABI. The dev machine runs **Node 24**, but `node_modules` was built for the Docker image's **Node 20**.
-- **Fix:** run the API in its container (the normal path), or use Node 20 locally (`nvm use 20`), or `npm --prefix backend-node rebuild better-sqlite3` for the host's Node. For route-level checks without a DB, use `app.inject()` in a test (that is how the `FEATURE_LEGACY_SAAS` gate was verified).
-- **Carry forward:** pin `"engines": { "node": "20.x" }` and add `.nvmrc` when the test runner is added (P0).
+- **Fix:** run the API in its container (the normal path, which is what `ops/up.ps1` does). To run it on the host, `npm --prefix backend-node rebuild better-sqlite3` for the host's Node. For route-level checks without a DB, use `app.inject()` in a test (that is how the `FEATURE_LEGACY_SAAS` gate was verified).
+- **Note:** host Node 24.5.0 is intentional. `ops/up.ps1` selects it via nvm because the dashboard's Vite needs Node ≥ 20.19. Don't downgrade the host to 20.
+- **Carry forward:** backend tests that need SQLite must run in the Node 20 container, or after a host rebuild of `better-sqlite3`.
+
+### L14 — Deleting Docker's data leaves a stale minikube profile, and `minikube start` hangs
+- **Symptom:** `minikube start` sits on `Pulling base image v0.0.47 ...` for 20+ minutes; `minikube status` says `No such container: minikube`.
+- **Cause:** Docker's data folder was deleted, which removed the `minikube` container, its volume (the whole cluster: stores, PVCs, platform DB) and the kicbase image. `~\.minikube\profiles` still described the old cluster, so minikube tried to resume something that no longer existed.
+- **Fix:** `minikube delete` (cleans the stale profile), then start fresh. `~\.minikube\cache` survives, so the restart reuses the cached kicbase and preload (~1.2 GB) instead of downloading. Full rebuild with `ops/up.ps1` took about 10 minutes.
+- **Also:** minikube can't change CPU/memory of an existing cluster; set them once with `minikube config set memory 8192` / `cpus 4` before `minikube start`. Docker Desktop's memory is limited by `%USERPROFILE%\.wslconfig` (`[wsl2] memory=10GB`) then `wsl --shutdown`. This machine: 15.4 GB RAM → WSL 10 GB → minikube 8 GB.
 
 ---
 

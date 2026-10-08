@@ -8,7 +8,7 @@ Rules for this file (see [AGENTS.md](AGENTS.md)):
 - Add new items where they belong. Never delete items; strike through ~~like this~~ with a reason if dropped.
 - Design details live in [DESIGN.md](DESIGN.md) (section numbers given as §n). Lessons and gotchas go into [SYSTEM.md](SYSTEM.md).
 
-Last reviewed: 2026-10-08
+Last reviewed: 2026-10-09
 
 ---
 
@@ -36,7 +36,7 @@ Last reviewed: 2026-10-08
 - [x] Remove leftovers: `ForceDLT.txt`, `ns.json`, `tmp-store-ingress-patch.json`, `outputs/` (notes moved to SYSTEM.md L8/L9). Proof: commit `9b1ed9b`
 - [x] Delete legacy Python `backend/` (still in git history). Proof: commit `f22cd07`
 - [x] Put Stripe billing, custom domains, backups, content suggestions and Medusa behind `FEATURE_LEGACY_SAAS` (default `false`; routes return 404 `feature_disabled`; dashboard reads `GET /config` and hides the panels; code kept). Proof: `npm run check` ✓, dashboard `build` + `lint` ✓, gate verified with `app.inject()` on Fastify 4.29.1 (both flag values). Not yet run in-cluster
-- [ ] Add `engines: node 20.x` + `.nvmrc` (SYSTEM.md L13)
+- [ ] Make backend tests runnable (in the Node 20 container, or with a host rebuild of `better-sqlite3`; SYSTEM.md L13)
 - [ ] Move `STRIPE_*`, `GROQ_API_KEY` and `ADMIN_API_KEY` out of plain Helm `env` into Secrets (they are currently plain env in `values*.yaml`)
 - [ ] Remove the Loom link appended to `.env.example`
 - [ ] Add `backend-node` test runner (`vitest` or `node --test`) and a `npm test` script
@@ -133,7 +133,7 @@ Last reviewed: 2026-10-08
 - [x] platform-api: readiness + liveness probes, requests/limits, non-root, seccomp, dropped caps
 - [x] Platform API persistence via PVC
 - [x] Scoped RBAC ClusterRole for the reconciler (no wildcards)
-- [~] Dashboard Deployment exists but `dashboard.enabled: false` locally, has no liveness probe, `resources: {}`, and runs nginx as root → fix all four
+- [~] Dashboard Deployment exists but has no liveness probe, `resources: {}`, and runs nginx as root. Also, **the templates ignore `dashboard.enabled`**: with `enabled: false` the pod is still created and sits in `ImagePullBackOff` (image `store-platform/dashboard:dev` is never built). Fix all of these, and have `up.ps1` build the dashboard image
 - [ ] Dashboard served in-cluster behind Ingress at `dashboard.<domain>`; API under `/api`, gateway under `/mcp` (same origin → no CORS)
 - [ ] Every workload has readiness + liveness + requests/limits (checklist table in DESIGN §10.2)
 - [ ] All credentials in Secrets; `existingSecret` support for prod; chart-generated with `lookup` for local
