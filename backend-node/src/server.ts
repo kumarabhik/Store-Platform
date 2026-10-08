@@ -22,6 +22,7 @@ import {
   upsertBillingInvoice,
 } from "./billing";
 import { addEvent, openDb } from "./db";
+import { registerLegacySaasGate } from "./features";
 import { applyMysqlBackupJob, findJobPodName, makeKubeClients, readPodLogs, waitForJob } from "./kube";
 import { computeMetrics, renderPrometheus } from "./metrics.js";
 import { startReconciler } from "./provisioner";
@@ -51,19 +52,6 @@ type StoreRow = {
 };
 
 const DASHBOARD_FALLBACK_URL = "http://127.0.0.1:5173";
-
-// Pre-MCP SaaS features (Stripe billing, custom domains, DB backups, AI content suggestions).
-// Frozen behind FEATURE_LEGACY_SAAS: not part of the gateway scope, and every exposed route is attack surface.
-const LEGACY_SAAS_ROUTES = new Set([
-  "/billing/summary",
-  "/billing/checkout-session",
-  "/billing/confirm",
-  "/billing/portal",
-  "/stores/:id/domain",
-  "/stores/:id/backups",
-  "/stores/:id/backups/:backupId/download",
-  "/stores/:id/content-suggestions",
-]);
 
 const parsePositiveInt = (raw: string | undefined, fallback: number) => {
   const value = Number(raw);
@@ -385,12 +373,7 @@ async function main() {
     }
   });
 
-  app.addHook("onRequest", async (req, reply) => {
-    if (LEGACY_SAAS) return;
-    if (req.routeOptions.url && LEGACY_SAAS_ROUTES.has(req.routeOptions.url)) {
-      return reply.code(404).send({ error: "feature_disabled" });
-    }
-  });
+  registerLegacySaasGate(app, LEGACY_SAAS);
 
   app.get("/healthz", async () => ({ ok: true }));
   app.get("/config", async () => ({ features: { legacySaas: LEGACY_SAAS } }));

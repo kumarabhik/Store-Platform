@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "@fastify/cors": "^8.5.0",
@@ -16,6 +17,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.9",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.7"
   }
 }

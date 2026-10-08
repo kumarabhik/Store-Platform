@@ -1,0 +1,8 @@
+# Files that run or are parsed inside Linux containers must keep LF endings (SYSTEM.md G10).
+*.sh        text eol=lf
+*.php       text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.tpl       text eol=lf
+Dockerfile  text eol=lf
+charts/**   text eol=lf
