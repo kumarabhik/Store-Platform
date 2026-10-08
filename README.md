@@ -375,8 +375,10 @@ Delete store request path:
 |---|---|---|
 | `README.md` | Runbook, operations, troubleshooting | Demonstrates production run/operate thinking |
 | `SYSTEM_DESIGN.md` | High-level architecture and guarantees | Use this when explaining tradeoffs |
-| `ForceDLT.txt` | Local operator notes from debugging | Not runtime code; useful context only |
-| `ns.json` | Local artifact/empty file | Not part of runtime |
+| `DESIGN.md` | Full MCP gateway design, research, threat model | Source for architecture answers |
+| `ROADMAP.md` | Phase-by-phase progress with `[ ]` / `[~]` / `[x]` | What is done vs planned |
+| `SYSTEM.md` | Invariants, lessons learned, gotchas | Debugging history (replaces the old `ForceDLT.txt` notes) |
+| `AGENTS.md` / `CLAUDE.md` | Rules for contributors and AI agents | Working agreement |
 
 ### Node backend (`backend-node`)
 
