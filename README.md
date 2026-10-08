@@ -1,10 +1,25 @@
-# Store Platform (Minikube Demo)
+# Store Platform → Team MCP Gateway on Kubernetes
 
 This repo provisions isolated WooCommerce stores on Kubernetes from a control-plane API and dashboard.
+It is being extended into a **WooCommerce hosting platform with a team MCP gateway**: admins register MCP servers once, and every team member uses all of them through **one MCP endpoint** (with a personal API key) and through a **chat agent** in the dashboard.
 
-- Control plane API: `backend-node` (Node.js + Fastify)
+- Control plane API + (planned) MCP gateway + chat agent: `backend-node` (Node.js + Fastify)
 - Dashboard UI: `dashboard` (Vite + React)
 - Platform chart: `charts/platform`
+- (planned) WooCommerce MCP server: `mcp-servers/woo-mcp`
+- (planned) Store chart: `charts/store-woocommerce`, upstream servers chart: `charts/mcp-upstreams`
+
+## Documentation map
+
+| Doc | Read it for |
+|---|---|
+| [ROADMAP.md](ROADMAP.md) | What is done `[x]`, partial `[~]`, not started `[ ]`. Includes the Definition-of-Done tracker |
+| [DESIGN.md](DESIGN.md) | Full design: research, architecture, MCP flow, data model, security, threat model, Helm local vs prod |
+| [SYSTEM.md](SYSTEM.md) | Invariants and hard-won lessons (e.g. exponential backoff, ingress webhook, MariaDB first boot, Bitnami images) |
+| [AGENTS.md](AGENTS.md) | Rules for anyone (or any AI agent) changing the repo |
+| [STORE_PLATFORM_FULL_GUIDE.md](STORE_PLATFORM_FULL_GUIDE.md) | Easy-language guide to the whole project, including the MCP gateway plan |
+
+> The sections below describe the **current** store-provisioning platform. Setup for the MCP gateway (connecting Claude Code / Cursor, using the chat agent, VPS install) will be added here as the phases in ROADMAP.md are completed.
 
 ## 1. Prerequisites
 
@@ -230,7 +245,27 @@ kubectl get ns
 
 ## 8. Teardown (bring down)
 
-Stop local foreground processes first (`Ctrl+C` in dashboard and port-forward terminals).
+Safe shutdown with data preserved:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ops\down.ps1
+```
+
+This stops the local dashboard dev server, stops the API port-forward, and stops Minikube by default, but it preserves Helm releases, namespaces, PVCs, and cluster data.
+
+If you want to stop local processes but keep Minikube running:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ops\down.ps1 -KeepMinikube
+```
+
+If you want full cleanup and are okay deleting cluster resources and likely their volumes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ops\down.ps1 -DestroyData
+```
+
+Manual cleanup flow:
 
 Uninstall platform:
 

@@ -1,5 +1,5 @@
 global:
-  baseDomain: "192.168.49.2.nip.io"
+  baseDomain: "127.0.0.1.nip.io"
   ingressClassName: "nginx"
 
 api:
@@ -7,7 +7,9 @@ api:
   replicas: 1
   env:
     DB_PATH: "/data/platform.db"
-    BASE_DOMAIN: "192.168.49.2.nip.io"
+    BASE_DOMAIN: "127.0.0.1.nip.io"
+    STORE_PUBLIC_SCHEME: "http"
+    STORE_PUBLIC_PORT: "8088"
     INGRESS_CLASS_NAME: "nginx"
     STORE_CHART_REF: "bitnami/wordpress"
     BACKUP_DIR: "/data/backups"
@@ -26,7 +28,7 @@ api:
     CREATE_RATE_LIMIT_CAPACITY: "8"
     CREATE_RATE_LIMIT_REFILL_PER_SEC: "0.2"
     CREATE_RATE_LIMIT_TTL_SEC: "600"
-    CORS_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173,http://dashboard.192.168.49.2.nip.io"
+    CORS_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173,http://dashboard.127.0.0.1.nip.io"
   persistence:
     enabled: true
     size: 1Gi

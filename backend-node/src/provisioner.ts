@@ -72,6 +72,8 @@ type Config = {
   baseDomain: string;
   ingressClassName: string;
   chartRef: string;
+  storePublicScheme?: string;
+  storePublicPort?: string;
 };
 
 type StoreRow = {
@@ -104,6 +106,8 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
   const owner = `reconciler-${process.pid}`;
   ensureLeaderTable(db);
   let running = false;
+  const platformStoreUrlFor = (host: string, includePort = true) =>
+    `${cfg.storePublicScheme?.trim() || "http"}://${host}${includePort && cfg.storePublicPort?.trim() ? `:${cfg.storePublicPort.trim()}` : ""}`;
 
   const timer = setInterval(async () => {
     if (running) return;
@@ -172,7 +176,7 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
         const defaultHost = `store-${storeId}.${cfg.baseDomain}`;
         const customDomain = String(row.custom_domain ?? "").trim();
         const host = customDomain || defaultHost;
-        const url = `http://${host}`;
+        const url = customDomain ? platformStoreUrlFor(host, false) : platformStoreUrlFor(host, true);
 
         addEvent(db, storeId, "reconcile_start", `ns=${ns} host=${host}`);
 

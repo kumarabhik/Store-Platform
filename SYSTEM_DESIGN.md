@@ -1,3 +1,5 @@
+> This note covers the existing store provisioner. The full MCP gateway design is in [DESIGN.md](DESIGN.md); this file will become the short "System design and tradeoffs" deliverable (ROADMAP P9).
+
 ## Architecture
 - Dashboard (React): calls API to create/delete stores and view status/events.
 - API/Orchestrator (Node): persists desired state in SQLite and runs a reconcile loop.

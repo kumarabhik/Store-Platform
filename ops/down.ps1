@@ -1,5 +1,6 @@
 param(
-  [switch]$KeepMinikube
+  [switch]$KeepMinikube,
+  [switch]$DestroyData
 )
 
 $ErrorActionPreference = "Continue"
@@ -33,6 +34,7 @@ if (Test-Path $pidFile) {
   try {
     $state = Get-Content $pidFile -Raw | ConvertFrom-Json
     Stop-PidIfRunning -Pid ([int]$state.portForwardPid)
+    Stop-PidIfRunning -Pid ([int]$state.ingressPortForwardPid)
     Stop-PidIfRunning -Pid ([int]$state.dashboardPid)
   } catch {
     Write-Warning "PID file parse failed, using fallback process matching."
@@ -42,6 +44,7 @@ if (Test-Path $pidFile) {
 Get-CimInstance Win32_Process |
   Where-Object {
     $_.CommandLine -match 'port-forward\s+svc/platform-api\s+8080:80' -or
+    $_.CommandLine -match 'port-forward\s+svc/ingress-nginx-controller\s+8088:80' -or
     $_.CommandLine -match 'vite\\bin\\vite\.js.*--port\s+5173' -or
     $_.CommandLine -match 'npm-cli\.js.*--prefix\s+dashboard\s+run\s+dev'
   } |
@@ -54,30 +57,34 @@ if (Test-Path $pidFile) {
 }
 
 $clusterRunning = Test-MinikubeRunning
-if ($clusterRunning) {
-  Write-Host "Uninstalling Helm releases (platform + wc-* if present)..."
-  try {
-    $releases = helm ls -A --output json 2>$null | ConvertFrom-Json
-    foreach ($r in $releases) {
-      if ($r.name -eq 'platform' -or $r.name -like 'wc-*') {
-        helm uninstall $r.name -n $r.namespace | Out-Host
+if ($DestroyData) {
+  if ($clusterRunning) {
+    Write-Host "DestroyData enabled. Uninstalling Helm releases (platform + wc-* if present)..."
+    try {
+      $releases = helm ls -A --output json 2>$null | ConvertFrom-Json
+      foreach ($r in $releases) {
+        if ($r.name -eq 'platform' -or $r.name -like 'wc-*') {
+          helm uninstall $r.name -n $r.namespace | Out-Host
+        }
       }
+    } catch {
+      Write-Warning "Helm cleanup skipped or failed: $($_.Exception.Message)"
     }
-  } catch {
-    Write-Warning "Helm cleanup skipped or failed: $($_.Exception.Message)"
-  }
 
-  Write-Host "Deleting platform/store namespaces..."
-  try {
-    kubectl get ns --no-headers 2>$null |
-      ForEach-Object { ($_ -split '\s+')[0] } |
-      Where-Object { $_ -eq 'platform' -or $_ -like 'store-*' } |
-      ForEach-Object { kubectl delete ns $_ --wait=true | Out-Host }
-  } catch {
-    Write-Warning "Namespace cleanup skipped or failed: $($_.Exception.Message)"
+    Write-Host "DestroyData enabled. Deleting platform/store namespaces..."
+    try {
+      kubectl get ns --no-headers 2>$null |
+        ForEach-Object { ($_ -split '\s+')[0] } |
+        Where-Object { $_ -eq 'platform' -or $_ -like 'store-*' } |
+        ForEach-Object { kubectl delete ns $_ --wait=true | Out-Host }
+    } catch {
+      Write-Warning "Namespace cleanup skipped or failed: $($_.Exception.Message)"
+    }
+  } else {
+    Write-Host "Minikube is not running. Skipping Helm and namespace cleanup."
   }
 } else {
-  Write-Host "Minikube is not running. Skipping Helm and namespace cleanup."
+  Write-Host "Safe shutdown mode: preserving Helm releases, namespaces, PVCs, and cluster data."
 }
 
 if (-not $KeepMinikube) {
@@ -97,6 +104,12 @@ if (-not $KeepMinikube) {
 
 Write-Host ""
 Write-Host "Down complete."
+if ($DestroyData) {
+  Write-Host "Cluster resources were removed by request."
+} else {
+  Write-Host "Cluster resources and volumes were preserved."
+  Write-Host "Use -DestroyData if you want full cleanup."
+}
 if ($KeepMinikube) {
   Write-Host "Minikube is still running."
 } else {

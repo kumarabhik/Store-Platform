@@ -112,6 +112,8 @@ function extractSessionToken(req: FastifyRequest) {
 async function main() {
   const DB_PATH = process.env.DB_PATH ?? "./platform.db";
   const BASE_DOMAIN = process.env.BASE_DOMAIN ?? "127.0.0.1.nip.io";
+  const STORE_PUBLIC_SCHEME = process.env.STORE_PUBLIC_SCHEME?.trim() || "http";
+  const STORE_PUBLIC_PORT = process.env.STORE_PUBLIC_PORT?.trim() ?? "";
   const INGRESS_CLASS = process.env.INGRESS_CLASS_NAME ?? "nginx";
   const STORE_CHART_REF = process.env.STORE_CHART_REF ?? "bitnami/wordpress";
   const HOST = process.env.HOST ?? "0.0.0.0";
@@ -200,6 +202,9 @@ async function main() {
     ).replace(/\/$/, "");
 
   const platformHostFor = (storeId: string) => `store-${storeId}.${BASE_DOMAIN}`;
+  const platformUrlForHost = (host: string, includePort = true) =>
+    `${STORE_PUBLIC_SCHEME}://${host}${includePort && STORE_PUBLIC_PORT ? `:${STORE_PUBLIC_PORT}` : ""}`;
+  const platformUrlFor = (storeId: string) => platformUrlForHost(platformHostFor(storeId));
 
   async function stripeRequest(pathname: string, method: "GET" | "POST", body?: URLSearchParams) {
     if (!STRIPE_SECRET_KEY) throw new Error("Stripe is not configured.");
@@ -347,6 +352,8 @@ async function main() {
     baseDomain: BASE_DOMAIN,
     ingressClassName: INGRESS_CLASS,
     chartRef: STORE_CHART_REF,
+    storePublicScheme: STORE_PUBLIC_SCHEME,
+    storePublicPort: STORE_PUBLIC_PORT,
   });
 
   app.addHook("onRequest", async (req, reply) => {
@@ -636,7 +643,11 @@ async function main() {
       domainStatus: access.row.domain_status ?? "Platform subdomain",
       domainLastError: access.row.domain_last_error,
       targetHost: platformHostFor(access.row.id),
-      currentUrl: access.row.url ?? `http://${access.row.custom_domain?.trim() || platformHostFor(access.row.id)}`,
+      currentUrl:
+        access.row.url ??
+        (access.row.custom_domain?.trim()
+          ? platformUrlForHost(access.row.custom_domain.trim(), false)
+          : platformUrlFor(access.row.id)),
     };
   });
 

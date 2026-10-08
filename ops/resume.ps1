@@ -49,6 +49,8 @@ function Ensure-MinikubeRunning {
     minikube start | Out-Host
     minikube addons enable ingress | Out-Host
   }
+
+  kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s | Out-Host
 }
 
 function Ensure-PlatformPresent {
@@ -64,11 +66,78 @@ function Apply-PlatformConfig {
   kubectl -n platform rollout status deploy/platform-api --timeout=300s | Out-Host
 }
 
+function Test-LocalPortListening {
+  param([int]$Port)
+
+  $client = $null
+  try {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $connected = $client.ConnectAsync("127.0.0.1", $Port).Wait(500)
+    return ($connected -and $client.Connected)
+  } catch {
+    return $false
+  } finally {
+    if ($client) { $client.Dispose() }
+  }
+}
+
+function Test-HttpReady {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url
+  )
+
+  try {
+    $response = Invoke-WebRequest -Uri $Url -Method GET -UseBasicParsing -TimeoutSec 3
+    return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500)
+  } catch {
+    return $false
+  }
+}
+
+function Start-ProcessUntilListening {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Label,
+    [Parameter(Mandatory = $true)]
+    [string]$FilePath,
+    [Parameter(Mandatory = $true)]
+    [string[]]$ArgumentList,
+    [Parameter(Mandatory = $true)]
+    [int]$Port,
+    [string]$HealthUrl = "",
+    [int]$MaxAttempts = 5
+  )
+
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    Write-Host "$Label (attempt $attempt/$MaxAttempts)..."
+    $proc = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru
+
+    for ($tick = 0; $tick -lt 20; $tick++) {
+      Start-Sleep -Seconds 1
+      $portReady = Test-LocalPortListening -Port $Port
+      $serviceReady = if ($HealthUrl) { $portReady -and (Test-HttpReady -Url $HealthUrl) } else { $portReady }
+      if ($serviceReady) {
+        return $proc
+      }
+      if ($proc.HasExited) {
+        break
+      }
+    }
+
+    if (-not $proc.HasExited) {
+      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  throw "$Label failed to listen on port $Port."
+}
+
 function Stop-StaleLocalProcesses {
   if (Test-Path $pidFile) {
     try {
       $state = Get-Content $pidFile -Raw | ConvertFrom-Json
-      foreach ($pid in @($state.portForwardPid, $state.dashboardPid)) {
+      foreach ($pid in @($state.portForwardPid, $state.ingressPortForwardPid, $state.dashboardPid)) {
         if ($pid -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
           Stop-Process -Id $pid -Force
         }
@@ -81,6 +150,7 @@ function Stop-StaleLocalProcesses {
   Get-CimInstance Win32_Process |
     Where-Object {
       $_.CommandLine -match 'port-forward\s+svc/platform-api\s+8080:80' -or
+      $_.CommandLine -match 'port-forward\s+svc/ingress-nginx-controller\s+8088:80' -or
       $_.CommandLine -match 'vite\\bin\\vite\.js.*--port\s+5173' -or
       $_.CommandLine -match 'npm-cli\.js.*--prefix\s+dashboard\s+run\s+dev'
     } |
@@ -90,12 +160,29 @@ function Stop-StaleLocalProcesses {
 }
 
 function Start-LocalDev {
-  $pf = Start-Process -FilePath kubectl -ArgumentList '-n','platform','port-forward','svc/platform-api','8080:80' -PassThru
-  $dash = Start-Process -FilePath npm.cmd -ArgumentList '--prefix','dashboard','run','dev','--','--host','0.0.0.0','--port','5173' -PassThru
+  $pf = Start-ProcessUntilListening `
+    -Label "Starting API port-forward (8080 -> platform-api:80)" `
+    -FilePath "kubectl" `
+    -ArgumentList @('-n','platform','port-forward','svc/platform-api','8080:80') `
+    -Port 8080 `
+    -HealthUrl "http://127.0.0.1:8080/healthz"
+
+  $ingress = Start-ProcessUntilListening `
+    -Label "Starting ingress bridge (8088 -> ingress-nginx-controller:80)" `
+    -FilePath "kubectl" `
+    -ArgumentList @('-n','ingress-nginx','port-forward','svc/ingress-nginx-controller','8088:80') `
+    -Port 8088
+
+  $dash = Start-ProcessUntilListening `
+    -Label "Starting dashboard dev server on 5173" `
+    -FilePath "npm.cmd" `
+    -ArgumentList @('--prefix','dashboard','run','dev','--','--host','0.0.0.0','--port','5173') `
+    -Port 5173
 
   $state = [ordered]@{
     resumedAt = (Get-Date).ToString('o')
     portForwardPid = $pf.Id
+    ingressPortForwardPid = $ingress.Id
     dashboardPid = $dash.Id
   } | ConvertTo-Json
 
@@ -113,3 +200,4 @@ Write-Host ""
 Write-Host "Resume complete."
 Write-Host "Dashboard: http://127.0.0.1:5173"
 Write-Host "API:       http://127.0.0.1:8080/healthz"
+Write-Host "Stores:    http://store-<id>.127.0.0.1.nip.io:8088"
