@@ -17,6 +17,8 @@ api:
     BACKUP_DIR: "/data/backups"
     DASHBOARD_PUBLIC_URL: "http://127.0.0.1:5173"
     ADMIN_EMAILS: ""
+    # Pre-MCP SaaS features (billing, custom domains, backups, Medusa). Off for the gateway build.
+    FEATURE_LEGACY_SAAS: "false"
     STRIPE_SECRET_KEY: ""
     STRIPE_PRICE_ID: ""
     STRIPE_PLAN_LABEL: "Growth"

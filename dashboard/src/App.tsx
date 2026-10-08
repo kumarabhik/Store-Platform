@@ -257,6 +257,8 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  // Billing, custom domains and backups are frozen behind FEATURE_LEGACY_SAAS on the API.
+  const [legacySaas, setLegacySaas] = useState(false);
 
   const [stores, setStores] = useState<Store[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -380,7 +382,7 @@ export default function App() {
   }, [apiBase, apiRequest, clearWorkspace, currentUser, handleSessionExpired, selectedId]);
 
   const loadBilling = useCallback(async () => {
-    if (!currentUser) return;
+    if (!currentUser || !legacySaas) return;
     try {
       const res = await apiRequest("/billing/summary");
       if (res.status === 401) return handleSessionExpired();
@@ -390,7 +392,7 @@ export default function App() {
       console.error(err);
       setError("Billing summary could not be loaded.");
     }
-  }, [apiRequest, currentUser, handleSessionExpired]);
+  }, [apiRequest, currentUser, handleSessionExpired, legacySaas]);
 
   const loadWorkspace = useCallback(async () => {
     if (!selected) {
@@ -403,29 +405,47 @@ export default function App() {
     }
 
     try {
-      const [eventsRes, summaryRes, domainRes, monitoringRes, backupsRes] = await Promise.all([
+      const [eventsRes, summaryRes, monitoringRes, domainRes, backupsRes] = await Promise.all([
         apiRequest(`/stores/${selected.id}/events`),
         apiRequest(`/stores/${selected.id}/summary`),
-        apiRequest(`/stores/${selected.id}/domain`),
         apiRequest(`/stores/${selected.id}/monitoring`),
-        apiRequest(`/stores/${selected.id}/backups`),
+        legacySaas ? apiRequest(`/stores/${selected.id}/domain`) : null,
+        legacySaas ? apiRequest(`/stores/${selected.id}/backups`) : null,
       ]);
 
-      if ([eventsRes, summaryRes, domainRes, monitoringRes, backupsRes].some((res) => res.status === 401)) {
+      if ([eventsRes, summaryRes, monitoringRes, domainRes, backupsRes].some((res) => res?.status === 401)) {
         handleSessionExpired();
         return;
       }
 
       setEvents(eventsRes.ok ? ((await eventsRes.json()) as EventRow[]) : []);
       setSummary(summaryRes.ok ? ((await summaryRes.json()) as StoreSummary) : null);
-      setDomainInfo(domainRes.ok ? ((await domainRes.json()) as DomainInfo) : null);
       setMonitoring(monitoringRes.ok ? ((await monitoringRes.json()) as MonitoringSummary) : null);
-      setBackups(backupsRes.ok ? ((await backupsRes.json()) as BackupRow[]) : []);
+      setDomainInfo(domainRes?.ok ? ((await domainRes.json()) as DomainInfo) : null);
+      setBackups(backupsRes?.ok ? ((await backupsRes.json()) as BackupRow[]) : []);
     } catch (err) {
       console.error(err);
       setError("Store workspace data could not be loaded.");
     }
-  }, [apiRequest, handleSessionExpired, selected]);
+  }, [apiRequest, handleSessionExpired, legacySaas, selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadConfig() {
+      try {
+        const res = await apiRequest("/config", undefined, { omitSession: true });
+        if (!res.ok) return;
+        const data = (await res.json()) as { features?: { legacySaas?: boolean } };
+        if (!cancelled) setLegacySaas(Boolean(data.features?.legacySaas));
+      } catch {
+        // Older API without /config: keep legacy panels hidden.
+      }
+    }
+    void loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiRequest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -499,7 +519,7 @@ export default function App() {
   }, [loadWorkspace, selected]);
 
   useEffect(() => {
-    if (!currentUser || typeof window === "undefined") return;
+    if (!currentUser || !legacySaas || typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     const status = params.get("billing");
     const sessionId = params.get("session_id");
@@ -539,7 +559,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [apiRequest, currentUser, handleSessionExpired]);
+  }, [apiRequest, currentUser, handleSessionExpired, legacySaas]);
 
   async function submitAuth() {
     if (authSubmitting) return;
@@ -813,8 +833,9 @@ export default function App() {
               </div>
             </div>
             <p className="lede">
-              Sign in to provision WooCommerce stores, manage billing, attach custom domains, review monitoring, and
-              create backups without leaving the workspace.
+              {legacySaas
+                ? "Sign in to provision WooCommerce stores, manage billing, attach custom domains, review monitoring, and create backups without leaving the workspace."
+                : "Sign in to provision WooCommerce stores, review their Kubernetes health, and open their admin consoles from one workspace."}
             </p>
             <div className="guideMeta">
               <div>
@@ -828,8 +849,8 @@ export default function App() {
             </div>
             <ul className="featureList">
               <li>Account-scoped store ownership and login</li>
-              <li>Stripe billing for the SaaS account</li>
-              <li>Custom domains, backups, and Kubernetes health views</li>
+              {legacySaas && <li>Stripe billing for the SaaS account</li>}
+              <li>{legacySaas ? "Custom domains, backups, and Kubernetes health views" : "Kubernetes health views per store"}</li>
             </ul>
           </article>
 
@@ -962,6 +983,7 @@ export default function App() {
           </div>
         </article>
 
+        {legacySaas && (
         <article className="card billingCard featureCard">
           <div className="cardHeader">
             <div>
@@ -1006,6 +1028,7 @@ export default function App() {
             </p>
           )}
         </article>
+        )}
       </section>
 
       <section className="statsRow">
@@ -1113,6 +1136,7 @@ export default function App() {
         </section>
 
         <section className="detailColumn">
+          {legacySaas && (
           <article className="card panelCard accountCard">
             <div className="cardHeader">
               <div>
@@ -1143,6 +1167,7 @@ export default function App() {
               <div className="emptyState">No invoices yet. Start Stripe checkout to activate billing.</div>
             )}
           </article>
+          )}
 
           <article className="card panelCard selectedStoreCard">
             <div className="cardHeader">
@@ -1154,7 +1179,7 @@ export default function App() {
 
               {!selected && (
                 <div className="emptyState">
-                  Select a store to manage domains, backups, monitoring, and WooCommerce access. The normal flow is:
+                  Select a store to see {legacySaas ? "domains, backups, " : ""}monitoring and WooCommerce access. The normal flow is:
                   create store, wait for `Ready`, then open the workspace tools below.
                 </div>
               )}
@@ -1191,6 +1216,7 @@ export default function App() {
                 </div>
 
                 <div className="twoUp">
+                  {legacySaas && (
                   <article className="subCard">
                     <div className="cardHeader">
                       <div>
@@ -1222,6 +1248,7 @@ export default function App() {
                       <p className="inlineError">{domainInfo?.domainLastError ?? summary?.domainLastError}</p>
                     )}
                   </article>
+                  )}
 
                   <article className="subCard">
                     <div className="cardHeader">
@@ -1264,6 +1291,7 @@ export default function App() {
                   </article>
                 </div>
 
+                {legacySaas && (
                 <article className="subCard">
                   <div className="cardHeader">
                     <div>
@@ -1295,6 +1323,7 @@ export default function App() {
                     </div>
                   )}
                 </article>
+                )}
 
                 <article className="subCard">
                   <div className="cardHeader">

@@ -15,7 +15,7 @@ Last reviewed: 2026-10-08
 ## Progress at a glance
 | Phase | Scope | Status |
 |---|---|---|
-| P0 | Repo cleanup and baseline | `[ ]` |
+| P0 | Repo cleanup and baseline | `[~]` |
 | P1 | Store chart (own) + default store | `[~]` |
 | P2 | WooCommerce MCP server | `[ ]` |
 | P3 | Gateway core + `/mcp` endpoint | `[ ]` |
@@ -31,11 +31,12 @@ Last reviewed: 2026-10-08
 ---
 
 ## P0 — Repo cleanup and baseline
-- [ ] Commit current uncommitted work on `main` (ops scripts, port 8088 store URLs) as a checkpoint
-- [ ] Create branch `mcp-gateway`
-- [ ] Remove leftovers: `ForceDLT.txt`, `ns.json`, `tmp-store-ingress-patch.json`, `outputs/` (move useful notes into SYSTEM.md first)
-- [ ] Move legacy Python `backend/` to `legacy/` or delete (not part of runtime)
-- [ ] Put Stripe billing, custom domains, backups and Medusa behind `FEATURE_LEGACY_SAAS=false` (hide routes and UI; keep code)
+- [x] Commit current uncommitted work on `main` (ops scripts, port 8088 store URLs) as a checkpoint. Proof: commit `e2d8e56` on `main`; `.env.example` (Loom link) intentionally left uncommitted
+- [x] Create branch `mcp-gateway`
+- [x] Remove leftovers: `ForceDLT.txt`, `ns.json`, `tmp-store-ingress-patch.json`, `outputs/` (notes moved to SYSTEM.md L8/L9). Proof: commit `9b1ed9b`
+- [x] Delete legacy Python `backend/` (still in git history). Proof: commit `f22cd07`
+- [x] Put Stripe billing, custom domains, backups, content suggestions and Medusa behind `FEATURE_LEGACY_SAAS` (default `false`; routes return 404 `feature_disabled`; dashboard reads `GET /config` and hides the panels; code kept). Proof: `npm run check` ✓, dashboard `build` + `lint` ✓, gate verified with `app.inject()` on Fastify 4.29.1 (both flag values). Not yet run in-cluster
+- [ ] Add `engines: node 20.x` + `.nvmrc` (SYSTEM.md L13)
 - [ ] Move `STRIPE_*`, `GROQ_API_KEY` and `ADMIN_API_KEY` out of plain Helm `env` into Secrets (they are currently plain env in `values*.yaml`)
 - [ ] Remove the Loom link appended to `.env.example`
 - [ ] Add `backend-node` test runner (`vitest` or `node --test`) and a `npm test` script
@@ -125,7 +126,7 @@ Last reviewed: 2026-10-08
 - [ ] Audit page: filterable table, auto-refresh
 - [ ] Chat page: messages + tool-call cards
 - [ ] Connect page: gateway URL and snippets for Claude Code / Cursor / Inspector
-- [ ] Hide legacy SaaS panels behind the feature flag
+- [x] Hide legacy SaaS panels behind the feature flag (done in P0)
 
 ## P8 — Helm and Kubernetes completeness (DESIGN §10)
 - [x] `charts/platform` with `values.yaml`, `values-local.yaml`, `values-prod.yaml`

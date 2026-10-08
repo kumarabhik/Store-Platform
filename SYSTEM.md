@@ -90,6 +90,12 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Cause:** `imagePullPolicy: IfNotPresent` + same `:dev` tag means the node keeps its cached copy.
 - **Fix:** `minikube image load <img>:dev` **and** `kubectl rollout restart deploy/<name>`, or use a unique tag per build (`:dev-<gitsha>`) and pass it via `--set`.
 
+### L13 — The API doesn't start on the host Node version (`better-sqlite3` native binding)
+- **Symptom:** `node dist/server.js` on the dev machine crashes in `openDb` with `ERR_DLOPEN_FAILED` from `better-sqlite3/lib/database.js`.
+- **Cause:** `better-sqlite3` is a native addon compiled for one Node ABI. The dev machine runs **Node 24**, but `node_modules` was built for the Docker image's **Node 20**.
+- **Fix:** run the API in its container (the normal path), or use Node 20 locally (`nvm use 20`), or `npm --prefix backend-node rebuild better-sqlite3` for the host's Node. For route-level checks without a DB, use `app.inject()` in a test (that is how the `FEATURE_LEGACY_SAAS` gate was verified).
+- **Carry forward:** pin `"engines": { "node": "20.x" }` and add `.nvmrc` when the test runner is added (P0).
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)

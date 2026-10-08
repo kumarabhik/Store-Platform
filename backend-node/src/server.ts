@@ -52,6 +52,19 @@ type StoreRow = {
 
 const DASHBOARD_FALLBACK_URL = "http://127.0.0.1:5173";
 
+// Pre-MCP SaaS features (Stripe billing, custom domains, DB backups, AI content suggestions).
+// Frozen behind FEATURE_LEGACY_SAAS: not part of the gateway scope, and every exposed route is attack surface.
+const LEGACY_SAAS_ROUTES = new Set([
+  "/billing/summary",
+  "/billing/checkout-session",
+  "/billing/confirm",
+  "/billing/portal",
+  "/stores/:id/domain",
+  "/stores/:id/backups",
+  "/stores/:id/backups/:backupId/download",
+  "/stores/:id/content-suggestions",
+]);
+
 const parsePositiveInt = (raw: string | undefined, fallback: number) => {
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -130,6 +143,7 @@ async function main() {
   const isProduction = (process.env.NODE_ENV ?? "development") === "production";
   const trustProxy = parseBoolean(process.env.TRUST_PROXY, isProduction);
   const rateLimitEnabled = parseBoolean(process.env.RATE_LIMIT_ENABLED, true);
+  const LEGACY_SAAS = parseBoolean(process.env.FEATURE_LEGACY_SAAS, false);
 
   const globalLimiter = makeTokenBucket({
     capacity: parsePositiveInt(process.env.RATE_LIMIT_CAPACITY, 60),
@@ -371,7 +385,15 @@ async function main() {
     }
   });
 
+  app.addHook("onRequest", async (req, reply) => {
+    if (LEGACY_SAAS) return;
+    if (req.routeOptions.url && LEGACY_SAAS_ROUTES.has(req.routeOptions.url)) {
+      return reply.code(404).send({ error: "feature_disabled" });
+    }
+  });
+
   app.get("/healthz", async () => ({ ok: true }));
+  app.get("/config", async () => ({ features: { legacySaas: LEGACY_SAAS } }));
   app.get("/metrics", async (_req, reply) => {
     reply.header("content-type", "text/plain; version=0.0.4");
     return renderPrometheus(computeMetrics(db));
@@ -759,7 +781,7 @@ async function main() {
     const parsed = z
       .object({
         name: z.string().trim().min(2).max(80),
-        engine: z.enum(["woocommerce", "medusa"]).default("woocommerce"),
+        engine: (LEGACY_SAAS ? z.enum(["woocommerce", "medusa"]) : z.enum(["woocommerce"])).default("woocommerce"),
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send(parsed.error.flatten());
