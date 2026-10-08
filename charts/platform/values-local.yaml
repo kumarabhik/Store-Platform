@@ -15,7 +15,6 @@ api:
     BACKUP_DIR: "/data/backups"
     DASHBOARD_PUBLIC_URL: "http://127.0.0.1:5173"
     ADMIN_EMAILS: ""
-    STRIPE_SECRET_KEY: ""
     STRIPE_PRICE_ID: ""
     STRIPE_PLAN_LABEL: "Growth"
     MAX_STORES: "50"

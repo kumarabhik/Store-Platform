@@ -6,6 +6,10 @@ global:
     secretName: "wildcard-tls-secret"
 
 api:
+  # Create before installing (never put credentials in this file):
+  #   kubectl -n platform create secret generic platform-api-env \
+  #     --from-literal=GROQ_API_KEY=... --from-literal=ADMIN_API_KEY=...
+  envSecretName: "platform-api-env"
   env:
     BASE_DOMAIN: "your-vps-domain.com"
     INGRESS_CLASS_NAME: "nginx"

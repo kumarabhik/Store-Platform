@@ -63,7 +63,8 @@ function Ensure-Minikube {
 }
 
 function Deploy-Platform {
-  Write-PlatformEnvOverrideFile -RepoRoot $repoRoot -OutputPath $helmEnvOverrideFile | Out-Null
+  $envChecksum = Sync-PlatformApiSecret -RepoRoot $repoRoot -StateDir $stateDir
+  Write-PlatformEnvOverrideFile -RepoRoot $repoRoot -OutputPath $helmEnvOverrideFile -EnvChecksum $envChecksum | Out-Null
 
   if (-not $SkipImageBuild) {
     Write-Host "Building API image in Minikube..."

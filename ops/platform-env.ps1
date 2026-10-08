@@ -50,12 +50,55 @@ function Get-RepoEnvMap {
   return $result
 }
 
+function Test-SecretEnvKey {
+  param([string]$Name)
+  # GROQ_API_KEY, STRIPE_SECRET_KEY, ADMIN_API_KEY, *_TOKEN, *_PASSWORD (but not RATE_LIMIT_MAX_KEYS).
+  return ($Name -match '(KEY|TOKEN|PASSWORD)$') -or ($Name -match 'SECRET')
+}
+
+# Writes credential keys from .env/.env.local into the platform-api-env Secret (never into Helm values,
+# which would make them plain env on the Deployment). Returns a checksum used to restart the pod on change.
+function Sync-PlatformApiSecret {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$RepoRoot,
+    [Parameter(Mandatory = $true)]
+    [string]$StateDir,
+    [string]$Namespace = "platform",
+    [string]$SecretName = "platform-api-env"
+  )
+
+  $repoEnv = Get-RepoEnvMap -RepoRoot $RepoRoot
+  $lines = @()
+  foreach ($key in ($repoEnv.Keys | Sort-Object)) {
+    if ((Test-SecretEnvKey -Name $key) -and $repoEnv[$key]) { $lines += "$key=$($repoEnv[$key])" }
+  }
+
+  kubectl get namespace $Namespace -o name 2>$null | Out-Null
+  if ($LASTEXITCODE -ne 0) { kubectl create namespace $Namespace | Out-Null }
+
+  $envFile = Join-Path $StateDir "platform-api-env.tmp"
+  try {
+    # UTF-8 without BOM: a BOM would become part of the first key name.
+    [System.IO.File]::WriteAllLines($envFile, [string[]]$lines)
+    kubectl -n $Namespace create secret generic $SecretName --from-env-file=$envFile --dry-run=client -o yaml |
+      kubectl apply -f - | Out-Null
+  } finally {
+    Remove-Item $envFile -Force -ErrorAction SilentlyContinue
+  }
+
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
+  return (([System.BitConverter]::ToString($hash)) -replace '-', '').ToLowerInvariant()
+}
+
 function Write-PlatformEnvOverrideFile {
   param(
     [Parameter(Mandatory = $true)]
     [string]$RepoRoot,
     [Parameter(Mandatory = $true)]
-    [string]$OutputPath
+    [string]$OutputPath,
+    [string]$EnvChecksum = ""
   )
 
   $repoEnv = Get-RepoEnvMap -RepoRoot $RepoRoot
@@ -64,11 +107,13 @@ function Write-PlatformEnvOverrideFile {
   foreach ($key in $repoEnv.Keys) {
     if ($key -like "VITE_*") { continue }
     if ($key -notmatch '^[A-Z0-9_]+$') { continue }
+    if (Test-SecretEnvKey -Name $key) { continue }
     $apiEnv[$key] = [string]$repoEnv[$key]
   }
 
   $lines = New-Object System.Collections.Generic.List[string]
   $lines.Add("api:")
+  $lines.Add("  envChecksum: '$EnvChecksum'")
   if ($apiEnv.Count -eq 0) {
     $lines.Add("  env: {}")
   } else {

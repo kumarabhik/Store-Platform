@@ -9,6 +9,10 @@ api:
   image: "store-platform/api-node:dev"
   replicas: 1
   resources: {}
+  # Secret with credential env vars (STRIPE_SECRET_KEY, GROQ_API_KEY, ADMIN_API_KEY, ...).
+  # Local: created from .env.local by ops/platform-env.ps1. Prod: create it out-of-band.
+  envSecretName: "platform-api-env"
+  envChecksum: ""
   env:
     DB_PATH: "/data/platform.db"
     BASE_DOMAIN: "127.0.0.1.nip.io"
@@ -19,7 +23,6 @@ api:
     ADMIN_EMAILS: ""
     # Pre-MCP SaaS features (billing, custom domains, backups, Medusa). Off for the gateway build.
     FEATURE_LEGACY_SAAS: "false"
-    STRIPE_SECRET_KEY: ""
     STRIPE_PRICE_ID: ""
     STRIPE_PLAN_LABEL: "Growth"
     MAX_STORES: "3"

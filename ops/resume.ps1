@@ -61,7 +61,8 @@ function Ensure-PlatformPresent {
 }
 
 function Apply-PlatformConfig {
-  Write-PlatformEnvOverrideFile -RepoRoot $repoRoot -OutputPath $helmEnvOverrideFile | Out-Null
+  $envChecksum = Sync-PlatformApiSecret -RepoRoot $repoRoot -StateDir $stateDir
+  Write-PlatformEnvOverrideFile -RepoRoot $repoRoot -OutputPath $helmEnvOverrideFile -EnvChecksum $envChecksum | Out-Null
   helm upgrade --install platform ./charts/platform -n platform -f ./charts/platform/values-local.yaml -f $helmEnvOverrideFile --set api.image=store-platform/api-node:dev | Out-Host
   kubectl -n platform rollout status deploy/platform-api --timeout=300s | Out-Host
 }

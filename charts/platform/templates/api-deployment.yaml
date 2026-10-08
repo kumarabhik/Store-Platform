@@ -11,6 +11,9 @@ spec:
     metadata:
       labels:
         app: {{ include "platform.apiName" . }}
+      annotations:
+        # Changes when the env Secret's content changes, so the pod restarts and picks it up.
+        checksum/env-secret: {{ .Values.api.envChecksum | default "" | quote }}
     spec:
       serviceAccountName: {{ include "platform.apiName" . }}
       securityContext:
@@ -29,6 +32,12 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
             {{- end }}
+          # Credentials (Stripe, LLM, admin API key) come only from this Secret, never from values.
+          # An explicit env entry would override it, so secret keys must not appear in api.env.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.api.envSecretName | quote }}
+                optional: true
           readinessProbe:
             httpGet:
               path: /healthz
