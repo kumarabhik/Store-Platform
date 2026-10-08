@@ -314,7 +314,7 @@ kubectl get ns | findstr store-
 - `CORS_ORIGINS`: comma-separated allowlist (`*` supported).
 - `ADMIN_API_KEY`: required for sensitive credential endpoints when set.
 
-Note: The orchestrator/API used by the platform is `backend-node` (Node.js). The `backend/` Python folder is not part of this control-plane runtime path.
+Note: The orchestrator/API used by the platform is `backend-node` (Node.js). An early Python prototype (`backend/`) was removed; it is still in git history (for example `git show e2d8e56:backend/app/main.py`).
 
 ## 11. Interview Study Plan (Full Project)
 
@@ -344,8 +344,6 @@ Use this order so you understand both architecture and implementation details.
 7. Review helpers and demo scripts:
    - `scripts/*.sh`
    - `scripts/*.md`
-8. Review legacy Python prototype only for historical context:
-   - `backend/app/*.py`
 
 ## 12. Runtime Flow (Code Map)
 
@@ -442,17 +440,6 @@ Delete store request path:
 |---|---|---|
 | `charts/store-woocommerce/Chart.yaml` | Placeholder chart metadata | Historical stub |
 | `charts/store-woocommerce/values.yaml` | Minimal ingress values | Current runtime actually uses Bitnami chart via Helm job |
-
-### Legacy Python prototype (`backend`)
-
-| File | What it does | Interview note |
-|---|---|---|
-| `backend/app/main.py` | FastAPI prototype orchestrator | Legacy path, not active runtime |
-| `backend/app/kube.py` | Python K8s + Helm subprocess helpers | Legacy path |
-| `backend/app/models.py` | SQLAlchemy store model | Legacy path |
-| `backend/app/settings.py` | Env settings for Python app | Legacy path |
-| `backend/requirements.txt` | Python deps | Legacy path |
-| `backend/Dockerfile` | Python API image | Legacy path |
 
 ### Scripts and operations helpers (`scripts`)
 
