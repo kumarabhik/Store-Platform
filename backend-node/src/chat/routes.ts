@@ -42,4 +42,16 @@ export function registerChatRoutes(app: FastifyInstance, { deps, currentUser }: 
     await runChat({ ...deps, llm: deps.llm }, { id: user.id, email: user.email, name: user.name, role: user.role }, parsed.data.messages, emit, abort.signal);
     reply.raw.end();
   });
+
+  // The answer to an approval_required event (P10). Only the user whose chat is waiting can answer;
+  // an unknown, expired or someone else's id is 404.
+  app.post("/api/chat/approvals/:id", async (req, reply) => {
+    const user = currentUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = z.object({ approve: z.boolean() }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "invalid", message: "Chat: body must be {\"approve\": true|false}" });
+    const found = deps.approvals?.store.decide((req.params as { id: string }).id, user.id, parsed.data.approve) ?? false;
+    if (!found) return reply.code(404).send({ error: "not_found", message: "Chat: no pending approval with this id (answered, expired, or not yours)" });
+    return { ok: true };
+  });
 }

@@ -38,6 +38,7 @@ Controls in place:
 - Every tool is namespaced `slug__tool`, so an upstream can't shadow another server's tool name, and the model sees which system each tool belongs to.
 - Descriptions are cleaned (control and zero-width characters stripped), capped at 1 024 characters and prefixed with the server name (`gateway/catalog.ts`).
 - Results over 256 KB are rejected, not truncated (`gateway/core.ts`).
+- **Human approval in the chat (P10):** before any tool that changes data, the chat shows the exact call and waits for the user's Approve; a decline or no answer is audited and the tool never runs. A prompt injection in a product description can propose a change, but can't make it happen without the user clicking Approve.
 - The chat's system prompt marks tool results and descriptions as data, never instructions. The loop is capped at 8 rounds, 120 s and 4 parallel calls, and the user sees every tool call as a card.
 
 - **Pinning (rug-pull defence, S6):** a tool's first definition is approved on sight; if the upstream later changes its description, schema or annotations, the tool disappears for everyone until an admin reviews and approves the new version. Annotations are part of the hash, so an upstream can't quietly drop `destructiveHint` to escape the admin-only default.

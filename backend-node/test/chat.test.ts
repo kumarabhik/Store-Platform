@@ -168,3 +168,101 @@ describe("OpenAI-compatible client", () => {
     expect(String(err)).not.toContain("gsk_secret_value");
   });
 });
+
+describe("human approval for risky calls (P10)", async () => {
+  const { approvalReason, parseApprovalMode, createApprovals } = await import("../src/chat/approval");
+  const tools: Record<string, { annotations?: Record<string, unknown> }> = {
+    woo__create_product: { annotations: { readOnlyHint: false, destructiveHint: false } },
+    woo__update_order_status: { annotations: { readOnlyHint: false, destructiveHint: true } },
+    woo__list_orders: { annotations: { readOnlyHint: true } },
+  };
+
+  // A fake core that also answers findTool / recordDeclined, and an approvals store whose pending
+  // requests the test answers like the browser would.
+  function setup(answer: (e: Extract<ChatEvent, { type: "approval_required" }>) => boolean | "never", timeoutMs = 2_000) {
+    const store = createApprovals(timeoutMs);
+    const { core, calls } = fakeCore(() => ({ content: [{ type: "text", text: "done" }] }));
+    const declined: { name: string; reason: string }[] = [];
+    const fullCore = {
+      ...core,
+      findTool: (_u: GatewayUser, name: string) => (tools[name] ? ({ exposedName: name, ...tools[name] } as never) : undefined),
+      recordDeclined: (_u: GatewayUser, name: string, _a: unknown, _c: unknown, reason: string) => void declined.push({ name, reason }),
+    };
+    const events: ChatEvent[] = [];
+    const emit = (e: ChatEvent) => {
+      events.push(e);
+      if (e.type === "approval_required") {
+        const a = answer(e);
+        if (a !== "never") setTimeout(() => store.decide(e.id, user.id, a), 5);
+      }
+    };
+    const go = (llm: Llm) =>
+      runChat({ core: fullCore as never, llm, timezone: "UTC", approvals: { mode: "writes", store } }, user, [{ role: "user", content: "do it" }], emit);
+    return { go, events, calls, declined, store };
+  }
+
+  const once = (name: string, args: unknown) =>
+    scriptedLlm([() => ({ content: null, toolCalls: [call("c1", name, args)] }), () => ({ content: "ok", toolCalls: [] })]);
+
+  it("asks before a write, runs it after Approve", async () => {
+    const t = setup(() => true);
+    await t.go(once("woo__create_product", { name: "Mug" }).llm);
+    expect(t.events.map((e) => e.type)).toEqual(["tool_call", "approval_required", "approval_result", "tool_result", "message", "done"]);
+    expect(t.events[1]).toMatchObject({ name: "woo__create_product", args: { name: "Mug" }, reason: "This tool changes data.", call_id: "c1" });
+    expect(t.events[2]).toMatchObject({ outcome: "approved" });
+    expect(t.calls.map((c) => c.name)).toEqual(["woo__create_product"]);
+  });
+
+  it("Decline: the tool never runs, the model is told, and the decline is recorded", async () => {
+    const t = setup(() => false);
+    const { llm, seen } = once("woo__update_order_status", { order_id: 1, status: "cancelled" });
+    await t.go(llm);
+    expect(t.calls).toEqual([]);
+    expect(t.declined).toEqual([{ name: "woo__update_order_status", reason: "declined by the user in the chat" }]);
+    expect(t.events.find((e) => e.type === "approval_required")).toMatchObject({ reason: "This tool can overwrite or delete data." });
+    expect(t.events.find((e) => e.type === "tool_result")).toMatchObject({ ok: false });
+    expect(seen[1].messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringContaining("Not done: declined by the user") });
+  });
+
+  it("no answer in time counts as declined", async () => {
+    const t = setup(() => "never", 30);
+    await t.go(once("woo__create_product", {}).llm);
+    expect(t.events.find((e) => e.type === "approval_result")).toMatchObject({ outcome: "timeout" });
+    expect(t.calls).toEqual([]);
+    expect(t.declined[0].reason).toMatch(/no answer/);
+  });
+
+  it("read-only tools run without asking", async () => {
+    const t = setup(() => {
+      throw new Error("must not ask");
+    });
+    await t.go(once("woo__list_orders", { date: "today" }).llm);
+    expect(t.events.map((e) => e.type)).not.toContain("approval_required");
+    expect(t.calls.map((c) => c.name)).toEqual(["woo__list_orders"]);
+  });
+
+  it("only the user whose chat is waiting can answer; a closed stream declines", async () => {
+    const store = createApprovals(1_000);
+    const waiting = store.wait("a1", "u-a");
+    expect(store.decide("a1", "u-someone-else", true)).toBe(false);
+    expect(store.decide("nope", "u-a", true)).toBe(false);
+    expect(store.decide("a1", "u-a", true)).toBe(true);
+    expect(await waiting).toBe("approved");
+    expect(store.size).toBe(0);
+    const ac = new AbortController();
+    const closed = store.wait("a2", "u-a", ac.signal);
+    ac.abort();
+    expect(await closed).toBe("declined");
+  });
+
+  it("rules: mode and annotations decide", () => {
+    expect(parseApprovalMode(undefined)).toBe("writes");
+    expect(parseApprovalMode("Destructive")).toBe("destructive");
+    expect(approvalReason({ annotations: { readOnlyHint: true } }, "writes")).toBeNull();
+    expect(approvalReason({ annotations: {} }, "writes")).toBe("This tool changes data."); // no hint = treated as a write
+    expect(approvalReason({ annotations: { readOnlyHint: false } }, "destructive")).toBeNull();
+    expect(approvalReason({ annotations: { destructiveHint: true } }, "destructive")).not.toBeNull();
+    expect(approvalReason({ annotations: { destructiveHint: true } }, "off")).toBeNull();
+    expect(approvalReason(undefined, "writes")).toBeNull(); // unknown tool: callTool rejects it anyway
+  });
+});

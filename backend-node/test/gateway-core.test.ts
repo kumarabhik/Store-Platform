@@ -246,6 +246,24 @@ describe("gateway core with three upstreams (ok / slow / dead)", async () => {
     expect(createGatewayCore(db, registry, pool, health, { toolMode: "auto", autoThreshold: 40 }).listTools(member).length).toBeGreaterThan(2);
   });
 
+  it("P10: findTool resolves what a chat call would run (also behind gateway__call_tool); recordDeclined audits it", () => {
+    expect(core.findTool(member, "ok__echo")?.toolName).toBe("echo");
+    expect(core.findTool(member, "ok__wipe")).toBeUndefined(); // admin-only (S2): not the member's tool
+    const searchCore = createGatewayCore(db, registry, pool, health, { toolMode: "search" });
+    expect(searchCore.findTool(admin, "gateway__call_tool", { name: "ok__wipe" })?.annotations).toEqual({ destructiveHint: true });
+    expect(searchCore.findTool(admin, "gateway__search_tools")?.annotations).toMatchObject({ readOnlyHint: true });
+
+    searchCore.recordDeclined(admin, "gateway__call_tool", { name: "ok__wipe", arguments: { all: true } }, { source: "chat" }, "declined by the user in the chat");
+    expect(auditRows().at(-1)).toMatchObject({
+      exposed_name: "ok__wipe",
+      server_slug: "ok",
+      outcome: "denied",
+      error: "declined by the user in the chat",
+      source: "chat",
+      args_preview: '{"all":true}',
+    });
+  });
+
   it("S6 pinning: a tool whose definition changes is hidden from everyone until an admin approves it", async () => {
     rug.on = true;
     await health.probe(ids.ok);
@@ -290,8 +308,8 @@ describe("gateway core with three upstreams (ok / slow / dead)", async () => {
   it("every call above wrote exactly one audit row", () => {
     // 1 ok + 1 slow route + 1 timeout + 1 ok + 1 tool_error + 1 bad_request + 1 not_found + 1 denied
     // + 1 denied (S2, member) + 1 ok (S2, admin) + 3 searches + 1 ok + 1 denied + 1 not_found (S4)
-    // + 1 not_found (S6, changed tool) + 1 unreachable
-    expect(auditRows()).toHaveLength(18);
+    // + 1 declined (P10) + 1 not_found (S6, changed tool) + 1 unreachable
+    expect(auditRows()).toHaveLength(19);
   });
 
   describe("/mcp endpoint", () => {

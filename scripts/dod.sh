@@ -46,7 +46,25 @@ call() { mcp "$1" tools/call "{\"name\":\"$2\",\"arguments\":$3}"; }
 tool_prefixes() { json '[...new Set((j.result?.tools||[]).map(t=>t.name.split("__")[0]))].sort().join(",")'; }
 server_id() { as "$A" "$API/api/servers" | json "j.servers.find(s=>s.slug==='$1').id"; }
 # Chat as user A; prints the SSE stream.
-chat() { as "$A" -H 'Accept: text/event-stream' -d "{\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" "$API/api/chat"; }
+chat() { as "$A" -N -H 'Accept: text/event-stream' -d "{\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" "$API/api/chat"; }
+# Like chat, but answers every approval_required event with Approve, as the user would in the
+# dashboard (P10: the chat asks before tools that change data). Prints the whole stream.
+chat_approving() {
+  local out pid id seen=""
+  out=$(mktemp)
+  chat "$1" > "$out" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    for id in $(grep '^data: {"type":"approval_required"' "$out" | cut -c7- | while IFS= read -r l; do echo "$l" | json 'j.id'; done); do
+      case " $seen " in *" $id "*) continue ;; esac
+      seen="$seen $id"
+      as "$A" -d '{"approve":true}' "$API/api/chat/approvals/$id" > /dev/null
+    done
+    sleep 1
+  done
+  cat "$out"
+  rm -f "$out"
+}
 
 A_EMAIL=$(as "$A" "$API/auth/me" | json 'j.user.email')
 B_EMAIL=$(as "$B" "$API/auth/me" | json 'j.user.email')
@@ -93,7 +111,8 @@ note=$(call "$KEY" notes__add_note "{\"title\":\"Follow-up for order #$order_id\
 if [ "${SKIP_CHAT:-}" != 1 ]; then
   product="DoD Mug $stamp"
   # Name the store: with provisioned stores connected too, "create a product" alone is ambiguous.
-  stream=$(chat "In the default store (the woo tools), create a product called $product priced 499 rupees.")
+  stream=$(chat_approving "In the default store (the woo tools), create a product called $product priced 499 rupees.")
+  echo "$stream" | grep -q '"type":"approval_required".*"name":"woo__create_product"'     && pass "user A chat asked for approval before woo__create_product (P10)" || fail "chat ran woo__create_product without asking"
   if echo "$stream" | grep -q '"name":"woo__create_product","ok":true'; then
     found=$(curl -sS --max-time 30 --resolve store.127.0.0.1.nip.io:8088:127.0.0.1 -G --data-urlencode "search=$product" \
       "${STORE_URL:-http://store.127.0.0.1.nip.io:8088}/wp-json/wc/store/v1/products" | json 'j.map(p=>p.name+" "+p.prices.price/10**p.prices.currency_minor_unit).join(",")')

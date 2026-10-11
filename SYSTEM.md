@@ -223,6 +223,11 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Symptom (caught before shipping S8):** the API's `/metrics` was reachable through `api.<domain>`. Per-tool counters there would list admin-only tool names that `tools/list` hides from members (S2).
 - **Fix:** metrics are served by a second Fastify instance on port 9464, which no Ingress routes; the NetworkPolicy admits only the `monitoring` namespace. Public `/metrics` → 404; `verify-store-isolation.sh` checks the port is blocked from other namespaces.
 
+### L38 — curl buffers a stream written to a file unless you pass `-N`
+- **Symptom:** after chat approvals were added, `dod.sh` saw the `approval_required` event only after the 60 s approval had already timed out, although the same request with `-N` answered instantly.
+- **Cause:** curl buffers its output when stdout is not a terminal; the SSE events sat in curl's buffer instead of the file the script was polling.
+- **Fix:** `curl -N` (no buffering) for every streamed response a script reacts to while it runs ([dod.sh](scripts/dod.sh) `chat`).
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)

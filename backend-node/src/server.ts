@@ -44,6 +44,7 @@ import { applyAdminEmails, roleOf as storedRoleOf, signupRole } from "./team/mem
 import { registerTeamRoutes } from "./team/routes";
 import { createLlm, llmConfigFromEnv } from "./chat/llm";
 import { registerChatRoutes } from "./chat/routes";
+import { createApprovals, parseApprovalMode } from "./chat/approval";
 
 // PublicUser carries the stored role (users.role); see team/members.ts for how it is assigned.
 type CurrentUser = PublicUser;
@@ -424,7 +425,13 @@ async function main() {
   const llmConfig = llmConfigFromEnv();
   if (!llmConfig) app.log.warn("chat: no LLM_API_KEY/GROQ_API_KEY set, /api/chat will answer 503");
   registerChatRoutes(app, {
-    deps: { core: gateway, llm: llmConfig ? createLlm(llmConfig) : null, timezone: process.env.CHAT_TIMEZONE?.trim() || "UTC" },
+    deps: {
+      core: gateway,
+      llm: llmConfig ? createLlm(llmConfig) : null,
+      timezone: process.env.CHAT_TIMEZONE?.trim() || "UTC",
+      // Ask before risky tool calls in the chat (P10): CHAT_APPROVAL = writes | destructive | off.
+      approvals: { mode: parseApprovalMode(process.env.CHAT_APPROVAL), store: createApprovals() },
+    },
     currentUser: currentUserOf,
   });
   registerTeamRoutes(app, {

@@ -6,11 +6,16 @@ import { errorText, type Api } from "../lib/api";
 // and only user/assistant text is sent back (the API ignores anything else anyway).
 
 type ToolCard = { kind: "tool"; id: string; name: string; args: unknown; result?: { ok: boolean; ms: number; preview: string } };
-type Item = { kind: "user" | "assistant"; text: string } | { kind: "error"; text: string } | ToolCard;
+// P10: the agent wants to run a tool that changes data and waits for the user's answer.
+type ApprovalStatus = "pending" | "sending" | "approved" | "declined" | "timeout";
+type ApprovalCard = { kind: "approval"; id: string; name: string; args: unknown; reason: string; status: ApprovalStatus; error?: string };
+type Item = { kind: "user" | "assistant"; text: string } | { kind: "error"; text: string } | ToolCard | ApprovalCard;
 
 type ChatEvent =
   | { type: "tool_call"; id: string; name: string; args: unknown }
   | { type: "tool_result"; id: string; name: string; ok: boolean; ms: number; preview: string }
+  | { type: "approval_required"; id: string; call_id: string; name: string; args: unknown; reason: string; timeout_ms: number }
+  | { type: "approval_result"; id: string; call_id: string; outcome: "approved" | "declined" | "timeout" }
   | { type: "message"; text: string }
   | { type: "error"; message: string }
   | { type: "done"; rounds: number };
@@ -59,6 +64,23 @@ export function ChatPage({ api }: { api: Api }) {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  const setApproval = (id: string, patch: Partial<ApprovalCard>) =>
+    setItems((current) => current.map((i) => (i.kind === "approval" && i.id === id ? { ...i, ...patch } : i)));
+
+  // The answer goes in a separate request; the chat stream that asked is still open and continues.
+  async function answer(id: string, approve: boolean) {
+    setApproval(id, { status: "sending", error: undefined });
+    try {
+      const res = await api(`/api/chat/approvals/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approve }) });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { message?: string } | null;
+        setApproval(id, { status: "pending", error: body?.message ?? `HTTP ${res.status}` });
+      }
+    } catch (err) {
+      setApproval(id, { status: "pending", error: errorText(err, "Could not send the answer.") });
+    }
+  }
+
   async function send(text: string) {
     const question = text.trim();
     if (!question || running) return;
@@ -90,6 +112,9 @@ export function ChatPage({ api }: { api: Api }) {
         if (e.type === "tool_call") push({ kind: "tool", id: e.id, name: e.name, args: e.args });
         else if (e.type === "tool_result")
           setItems((current) => current.map((i) => (i.kind === "tool" && i.id === e.id ? { ...i, result: { ok: e.ok, ms: e.ms, preview: e.preview } } : i)));
+        else if (e.type === "approval_required")
+          push({ kind: "approval", id: e.id, name: e.name, args: e.args, reason: e.reason, status: "pending" });
+        else if (e.type === "approval_result") setApproval(e.id, { status: e.outcome });
         else if (e.type === "message") push({ kind: "assistant", text: e.text });
         else if (e.type === "error") push({ kind: "error", text: e.message });
       });
@@ -129,7 +154,29 @@ export function ChatPage({ api }: { api: Api }) {
             </div>
           )}
           {items.map((item, index) =>
-            item.kind === "tool" ? (
+            item.kind === "approval" ? (
+              <div key={item.id} className={`approvalCard approval-${item.status}`}>
+                <div className="approvalHead">
+                  <strong>Approve this action?</strong>
+                  <span className="subtle">{item.reason}</span>
+                </div>
+                <p className="mono">{item.name}</p>
+                <pre className="toolPreview">{JSON.stringify(item.args, null, 2)}</pre>
+                {item.status === "pending" || item.status === "sending" ? (
+                  <div className="buttonRow">
+                    <button className="btn btnPrimary btnSmall" disabled={item.status === "sending"} onClick={() => void answer(item.id, true)}>
+                      Approve
+                    </button>
+                    <button className="btn btnSecondary btnSmall" disabled={item.status === "sending"} onClick={() => void answer(item.id, false)}>
+                      Decline
+                    </button>
+                  </div>
+                ) : (
+                  <p className="subtle">{item.status === "approved" ? "Approved: running it." : item.status === "declined" ? "Declined: not done." : "No answer in time: not done."}</p>
+                )}
+                {item.error && <p className="inlineError">{item.error}</p>}
+              </div>
+            ) : item.kind === "tool" ? (
               <details key={`${item.id}-${index}`} className={`toolCard ${item.result ? (item.result.ok ? "toolOk" : "toolFail") : "toolRunning"}`}>
                 <summary>
                   <span className="mono">{item.name}</span>

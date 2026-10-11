@@ -402,6 +402,13 @@ gateway/
 - Acting as the user: the backend resolves the session to a user and calls `GatewayCore.callTool(user, …, {source:"chat"})`. The chat **cannot** call a tool that user cannot see, and every call lands in `audit_log` under that user.
 - Conversation history stays in browser memory (core). Persisting chats is a non-goal.
 
+### 7.4.1 Human approval for risky calls (P10)
+- In the dashboard chat a model can be steered by data it reads (§9.3). Authorization (S2) limits *what* a user may do; approval makes sure the user actually *wants* this call now.
+- Rule (`chat/approval.ts`): with `CHAT_APPROVAL=writes` (default) every tool not marked `readOnlyHint` asks first, and so does a tool without annotations; `destructive` asks only for `destructiveHint` tools; `off` never asks. In search mode the tool named inside `gateway__call_tool` is judged.
+- Flow: the agent emits `approval_required` (id, tool, arguments, reason) on the SSE stream and waits; the browser answers with `POST /api/chat/approvals/:id {approve}`; the agent emits `approval_result` and runs the call or tells the model "Not done: declined by the user". A decline or a 60 s timeout is audited (`outcome=denied`, `error` says why).
+- *Why pending approvals live in memory:* the waiting stream and the answer reach the same API process while it runs one replica (SQLite). With Postgres and several replicas this moves to a table. *Why 60 s:* it has to fit in the 120 s chat budget, so the turn can still finish after a late "yes".
+- *Why not for /mcp:* external MCP clients already ask their own user before each tool call (Claude Code's permission prompt), and the gateway has no screen to ask on.
+
 ### 7.5 Many-tools mode (stand-out #4)
 **As built** (`gateway/toolSearch.ts`): the mode is applied inside GatewayCore (`listTools` / `callTool`), so `/mcp` and the chat behave the same. Search covers only the tools the user may see (S2), and `gateway__call_tool` resolves the real tool through the normal path (policy, timeout, one audit row under the real tool name). The search itself is audited too (`gateway__search_tools`, server `gateway`). `gateway` is a reserved slug. Measured: 28 tools = 16 796 bytes of tool definitions per chat turn; search mode = 1 001 bytes. Default `auto` with threshold 40.
 `GATEWAY_TOOL_MODE = direct | search | auto` (auto switches to search when the visible tool count is above 40).

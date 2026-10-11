@@ -26,6 +26,7 @@ Last reviewed: 2026-10-11
 | P8 | Helm and K8s completeness | `[~]` (only a real VPS run of `deploy.sh` left) |
 | P9 | Docs, threat model, demo video | `[~]` |
 | B  | Bonus: multi-store provisioning | `[x]` |
+| P10 | Real-world additions (before the 2026-10-26 submission) | `[~]` |
 | S  | Stand-out items | `[~]` (S2, S4, S6, S8, S9 done; S1 VPS, S3 OAuth, S5 hosted servers, S7 multi-replica open) |
 
 ---
@@ -196,6 +197,17 @@ P7 status: every page is built (`dashboard/src/pages/*`, DESIGN §7.6 "As built"
 - [x] Delete removes MCP registration first. Proof (live): tools/list prefixes before `everything,notes,store_550560c1,store_c6f26425,woo` → right after `DELETE /stores/550560c1`: `everything,notes,store_c6f26425,woo`; server row gone at once; namespace gone after 51 s, then the store row
 - [x] Restart platform-api mid-provisioning → store completes. Proof (live): `rollout restart` while `helm-install-c6f26425` was running → new pod reclaimed after the 60 s lease, event `helm_job_attached`, release history one `deployed` revision, Ready + `mcp_registered`. Restart safety fixes in SYSTEM.md L34
 - [x] Demo: chat compares today's orders across two stores; delete one; its tools and namespace are gone. Proof (live): "Compare today's orders in Anku Shop and Bharat Bazaar" → `store_550560c1__list_orders` + `store_c6f26425__list_orders` → "1 order, 199 INR vs 2 orders, 398 INR" (correct); deletion as above
+
+## P10 — Real-world additions (plan agreed 2026-10-11; feature freeze 2026-10-22, submit by 2026-10-26)
+Not required by the assignment; they make the platform closer to something a real team would run. Order agreed with the owner.
+
+- [x] CI on GitHub Actions (details in P8). Proof: run 38129313617, all 12 jobs green
+- [x] Human approval for risky tool calls in the chat (owner approved, Rule 8). The agent shows an approval card (tool, arguments, reason) and waits for Approve/Decline before any tool that isn't read-only (`CHAT_APPROVAL=writes|destructive|off`); in search mode the real tool behind `gateway__call_tool` decides. Decline or no answer in 60 s: the tool never runs, the model is told, and the call is audited as `denied` with the reason. External MCP clients are unaffected (they confirm with their own user). `chat/approval.ts`, `chat/agent.ts`, `POST /api/chat/approvals/:id` (only the asking user; else 404), Chat page card. Proof: `chat.test.ts` (6 new: approve, decline, timeout, read-only runs directly, only the owner can answer, rules), `gateway-core.test.ts` "P10…"; live: create_product → asked → approved → product 30 created; update_order_status(26, cancelled) → asked → declined → order 26 still `processing`, audit `denied … declined by the user in the chat`; answering twice → 404; `dod.sh` now checks the approval (19/19)
+- [ ] Postgres instead of SQLite, then 2 API replicas (owner OK needed: new service)
+- [ ] VPS + HTTPS (S1; needs a VPS and a domain from the owner)
+- [ ] Prometheus + Grafana dashboard + alerts on the existing metrics (S8)
+- [ ] Backups + restore drill (store databases and the platform database)
+- [ ] More merchant tools in woo-mcp: sales summary for a date range, stock levels, refunds
 
 ## S — Stand-out items
 ### S1 VPS deployment

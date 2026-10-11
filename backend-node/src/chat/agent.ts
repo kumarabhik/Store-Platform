@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { approvalReason, APPROVAL_TIMEOUT_MS, type ApprovalMode, type Approvals } from "./approval";
 import { UnknownToolError, type GatewayCore, type GatewayUser } from "../gateway/core";
 import type { ChatMessage, Llm, ToolCall, ToolSpec } from "./llm";
 
@@ -15,6 +17,8 @@ const PREVIEW_CHARS = 400; // what the browser card shows
 export type ChatEvent =
   | { type: "tool_call"; id: string; name: string; args: unknown }
   | { type: "tool_result"; id: string; name: string; ok: boolean; ms: number; preview: string }
+  | { type: "approval_required"; id: string; call_id: string; name: string; args: unknown; reason: string; timeout_ms: number }
+  | { type: "approval_result"; id: string; call_id: string; outcome: "approved" | "declined" | "timeout" }
   | { type: "message"; text: string }
   | { type: "error"; message: string }
   | { type: "done"; rounds: number };
@@ -25,7 +29,9 @@ export interface HistoryMessage {
 }
 
 export interface ChatDeps {
-  core: Pick<GatewayCore, "listTools" | "callTool">;
+  core: Pick<GatewayCore, "listTools" | "callTool" | "findTool" | "recordDeclined">;
+  // Ask the user before risky calls (P10). Without it every call runs straight away.
+  approvals?: { mode: ApprovalMode; store: Approvals };
   llm: Llm;
   timezone: string;
   now?: () => Date;
@@ -102,6 +108,15 @@ export async function runChat(
   const messages: ChatMessage[] = [{ role: "system", content: systemPrompt(user, deps.timezone, now()) }, ...sanitizeHistory(history)];
   const tools = toolSpecs(deps.core, user);
 
+  // Shows the user what the model wants to run and waits for Approve/Decline (P10).
+  async function askUser(tc: ToolCall, args: Record<string, unknown>, reason: string) {
+    const id = crypto.randomUUID();
+    emit({ type: "approval_required", id, call_id: tc.id, name: tc.function.name, args, reason, timeout_ms: APPROVAL_TIMEOUT_MS });
+    const outcome = await deps.approvals!.store.wait(id, user.id, stop);
+    emit({ type: "approval_result", id, call_id: tc.id, outcome });
+    return outcome;
+  }
+
   let rounds = 0;
   try {
     for (;;) {
@@ -122,7 +137,15 @@ export async function runChat(
           const args = tc.function.arguments ? (JSON.parse(tc.function.arguments) as Record<string, unknown>) : {};
           emit({ type: "tool_call", id: tc.id, name: tc.function.name, args });
           announced = true;
-          result = await deps.core.callTool(user, tc.function.name, args, { source: "chat" });
+          const reason = deps.approvals ? approvalReason(deps.core.findTool(user, tc.function.name, args), deps.approvals.mode) : null;
+          const outcome = reason ? await askUser(tc, args, reason) : "approved";
+          if (outcome === "approved") {
+            result = await deps.core.callTool(user, tc.function.name, args, { source: "chat" });
+          } else {
+            const why = outcome === "timeout" ? "no answer from the user within the approval time" : "declined by the user in the chat";
+            deps.core.recordDeclined(user, tc.function.name, args, { source: "chat" }, why);
+            result = { isError: true, content: [{ type: "text", text: `Not done: ${why}. Don't retry this unless the user asks again.` }] };
+          }
         } catch (err) {
           // Bad JSON from the model or an unknown/forbidden tool: tell the model, keep the loop going.
           const message = err instanceof UnknownToolError ? `Unknown tool: ${tc.function.name}` : `Invalid tool call: ${(err as Error).message}`;

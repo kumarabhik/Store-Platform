@@ -65,7 +65,7 @@ Credentials for the LLM and admin tools go in the repo root `.env.local` (for ex
    ```
 
    In Claude Code, `/mcp` should show the gateway with 22 tools: `woo__*`, `notes__*`, `everything__*`. Try *"What orders came in today?"* or *"List today's orders and save a follow-up note for each customer"* (two upstreams in one prompt).
-4. **Chat.** The dashboard's Chat page runs the same tools as you: *"Create a product called Linen Shirt priced 499 rupees"*, then find it on the storefront. Every tool call is a card, and each one lands in **Audit** under your name.
+4. **Chat.** Before any tool that changes data, the chat shows an approval card (tool, arguments, reason) and waits for **Approve** or **Decline** (`CHAT_APPROVAL` in the values). The Chat page runs the same tools as you: *"Create a product called Linen Shirt priced 499 rupees"*, then find it on the storefront. Every tool call is a card, and each one lands in **Audit** under your name.
 5. **Place an order.** On the storefront, add a product to the cart and check out with **Cash on delivery**. The order appears in `/wp-admin` → WooCommerce → Orders, and in *"what orders came in today?"*.
 6. **Stores (bonus).** Create a store from the Stores page. It gets its own namespace, database, WooCommerce, MCP server and URL, and once it is Ready its tools appear as `store_<id>__*`. Ask the chat to *"compare today's orders in Anku Shop and Bharat Bazaar"*. Deleting a store removes its tools first, then everything else.
 
@@ -130,6 +130,7 @@ gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed H
 | Observability (#8) | Every failure names the server and the cause (API, dashboard, audit log); Prometheus metrics per server/tool/outcome, latency histogram, upstream up, on an in-cluster port (9464) | `gateway/metrics.ts`, `gateway/health.ts`, Servers page |
 | Upgrades and rollback (#9) | `--atomic` installs, rollback run live (revision 10 → back to 13), additive migrations | `scripts/deploy.sh`, section 4 |
 | VPS (#1, part) | Deploy script and Traefik prod values; not yet run on a real VPS | `scripts/deploy.sh`, `values-prod.yaml` |
+| Human approval (real-world) | The chat asks before every tool that changes data; declines are audited | `chat/approval.ts`, Chat page |
 | Tool permissions (#2) | Destructive tools admin-only by default; hidden from `tools/list` and refused on `tools/call`; per-tool "Who may use it" on the Servers page | `gateway/policy.ts`, `routes.ts`, Servers page |
 | Many tools (#4) | `GATEWAY_TOOL_MODE=search\|auto`: `gateway__search_tools` (BM25) + `gateway__call_tool`; -94% tool tokens per chat turn | `gateway/toolSearch.ts` |
 | Tool-definition pinning (#6) | A changed tool is hidden until an admin approves it ("Approve changes") | `gateway/health.ts`, `catalog.ts`, Servers page |

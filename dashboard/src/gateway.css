@@ -573,3 +573,36 @@ code,
   color: var(--warn);
   font-size: 14px;
 }
+
+.approvalCard {
+  align-self: flex-start;
+  width: min(80%, 720px);
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+  border-left: 4px solid var(--warn);
+  background: var(--warn-bg);
+  font-size: 14px;
+}
+
+.approvalHead {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.approvalCard .buttonRow {
+  margin-top: 10px;
+}
+
+.approval-approved {
+  border-left-color: var(--success);
+  background: var(--success-bg);
+}
+
+.approval-declined,
+.approval-timeout {
+  border-left-color: var(--muted);
+  background: rgba(236, 242, 247, 0.92);
+}

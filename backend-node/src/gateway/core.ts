@@ -73,6 +73,15 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
     return v;
   }
 
+  function findTool(user: GatewayUser, exposedName: string, args?: Record<string, unknown>): CatalogEntry | undefined {
+    const visible = catalog(user.role);
+    if (searchMode(visible)) {
+      if (exposedName === CALL_TOOL) return visible.find((e) => e.exposedName === String(args?.name ?? ""));
+      return META_TOOLS.find((e) => e.exposedName === exposedName);
+    }
+    return visible.find((e) => e.exposedName === exposedName);
+  }
+
   // A search over the tools this user may see. Audited like any call (I2), although it never
   // reaches an upstream.
   function runSearch(user: GatewayUser, visible: CatalogEntry[], args: Record<string, unknown> | undefined, ctx: CallContext): CallToolResult {
@@ -109,6 +118,33 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
     listTools(user: GatewayUser): CatalogEntry[] {
       const visible = catalog(user.role);
       return searchMode(visible) ? META_TOOLS : visible;
+    },
+
+    // The tool a call would really run, if this user may use it: for gateway__call_tool, the tool
+    // named in its arguments. Used by the chat to decide whether to ask the user first.
+    findTool,
+
+    // A call the user declined in the chat never reaches callTool, but it is still recorded (I2):
+    // outcome "denied", with the reason, under the user who said no.
+    recordDeclined(user: GatewayUser, exposedName: string, args: Record<string, unknown> | undefined, ctx: CallContext, reason: string): void {
+      const entry = findTool(user, exposedName, args);
+      const real = exposedName === CALL_TOOL && entry ? entry : undefined;
+      writeAudit(db, {
+        requestId: ctx.requestId ?? crypto.randomUUID(),
+        userId: user.id,
+        userEmail: user.email,
+        apiKeyId: ctx.apiKeyId ?? null,
+        source: ctx.source,
+        serverId: entry?.serverId === "gateway" ? null : (entry?.serverId ?? null),
+        serverSlug: entry?.serverSlug ?? null,
+        toolName: entry?.toolName ?? exposedName,
+        exposedName: real ? real.exposedName : exposedName,
+        durationMs: 0,
+        outcome: "denied",
+        error: reason,
+        args: real ? ((args?.arguments as Record<string, unknown>) ?? {}) : (args ?? {}),
+      });
+      metrics?.observe(entry?.serverSlug, entry?.toolName, "denied", 0);
     },
 
     async callTool(user: GatewayUser, exposedName: string, args: Record<string, unknown> | undefined, ctx: CallContext): Promise<CallToolResult> {
