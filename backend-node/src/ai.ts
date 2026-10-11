@@ -11,7 +11,8 @@ export async function suggestContent(storeId: string) {
 
   const key = process.env.GROQ_API_KEY;
   const base = process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1";
-  const model = process.env.GROQ_MODEL ?? "llama-3.1-70b-versatile";
+  // llama-3.1-70b-versatile was decommissioned (SYSTEM.md G3); share the chat agent's model setting.
+  const model = process.env.GROQ_MODEL ?? process.env.LLM_MODEL ?? "openai/gpt-oss-120b";
   const timeoutMsRaw = Number(process.env.AI_HTTP_TIMEOUT_MS ?? "15000");
   const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 15000;
 

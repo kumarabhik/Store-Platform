@@ -1,0 +1,8 @@
+# minikube: images are built inside the node by ops/up.ps1 (`minikube image build`), never pulled.
+notes:
+  image: store-platform/notes-mcp:dev
+  pullPolicy: Never
+
+everything:
+  image: store-platform/everything-mcp:dev
+  pullPolicy: Never

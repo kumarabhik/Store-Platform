@@ -52,8 +52,9 @@ If the task conflicts with any of them, **stop and say so** instead of silently 
 - Scripts run in Linux containers or on the VPS must have **LF** line endings (SYSTEM.md G10).
 
 ## Rule 7 — Git
-- Work on branch `mcp-gateway`, never commit directly to `main`.
-- Small commits with a clear message (`gateway: add audit log writer`). Don't commit `.env*` (except `.env.example`), DB files, or build output.
+- **Agents never commit and never push.** The owner reviews and commits every change, and pushes, themselves. Leave changes uncommitted in the working tree, and at the end of a task list the changed files and suggest a commit message.
+- Read-only git commands (`status`, `diff`, `log`, `ls-remote`) are fine.
+- Work happens on branch `mcp-gateway`. Never put `.env*` (except `.env.example`), DB files, or build output in a suggested commit.
 - Never `git push --force`, and never rewrite history that was shared.
 
 ## Rule 8 — When unsure

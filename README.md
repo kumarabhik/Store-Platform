@@ -6,8 +6,8 @@ It is being extended into a **WooCommerce hosting platform with a team MCP gatew
 - Control plane API + (planned) MCP gateway + chat agent: `backend-node` (Node.js + Fastify)
 - Dashboard UI: `dashboard` (Vite + React)
 - Platform chart: `charts/platform`
-- (planned) WooCommerce MCP server: `mcp-servers/woo-mcp`
-- (planned) Store chart: `charts/store-woocommerce`, upstream servers chart: `charts/mcp-upstreams`
+- WooCommerce MCP server: `mcp-servers/woo-mcp` (see [section 6.1](#61-how-woo-mcp-talks-to-the-store-and-why))
+- Store chart: `charts/store-woocommerce` (WordPress, MariaDB, init job, woo-mcp); (planned) upstream servers chart: `charts/mcp-upstreams`
 
 ## Documentation map
 
@@ -176,6 +176,37 @@ A store moves to `Ready` only after:
 Only then does URL get written in the store row and dashboard.
 
 Transient infrastructure errors (for example ingress webhook/controller hiccups or API timeouts) are retried automatically with backoff while the store remains in `Provisioning` (up to a retry cap), instead of failing immediately on first transient fault.
+
+## 6.1 How woo-mcp talks to the store, and why
+
+`woo-mcp` is our MCP server for one store. It has six tools: `list_products`, `create_product`, `list_orders`, `get_order`, `update_order_status` and `get_store_info`. It runs next to WordPress in the store namespace and speaks MCP over Streamable HTTP (stateless, JSON responses).
+
+```text
+gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed HTTP--> wordpress /wp-json/wc/v3
+        only caller allowed by NetworkPolicy        ClusterIP, no Ingress          same namespace
+```
+
+**It uses the WooCommerce REST API.** We considered three ways in:
+
+| Option | Verdict | Why |
+|---|---|---|
+| WooCommerce REST API v3 | **chosen** | Versioned and documented. Runs WooCommerce's own logic (stock, totals, status transitions, emails, HPOS order tables). Plain HTTP, so a NetworkPolicy can scope it, and it needs no Kubernetes permissions |
+| WP-CLI (`wp wc …`) | no | Needs `pods/exec` RBAC (close to cluster-admin) or a shared volume. Starts PHP for every call (slow). Output parsing is brittle |
+| SQL on MariaDB | no | Skips WooCommerce logic, breaks with HPOS (orders moved out of `wp_posts`), and gives the MCP server full DB power |
+
+**Authentication.** Requests inside the cluster are plain HTTP, and WooCommerce refuses Basic auth without HTTPS. So woo-mcp signs every request with **OAuth 1.0a (HMAC-SHA256)** ([oauth1.ts](mcp-servers/woo-mcp/src/oauth1.ts)). WooCommerce checks the signature against the store's *public* URL, not the Service URL we call, so woo-mcp gets both: `WOO_BASE_URL` (where to send) and `WOO_HOME_URL` (what to sign) (SYSTEM.md L18). The consumer key and secret are generated once by Helm in Secret `<release>-credentials`. The init job inserts them into WooCommerce, and only woo-mcp mounts them.
+
+**Who can call it.** Three layers. (1) The Service is ClusterIP and no Ingress routes to it. (2) A NetworkPolicy admits only `platform-api` pods from the `platform` namespace. (3) `/mcp` needs `Authorization: Bearer <mcp-token>`, from the same Secret. `bash scripts/verify-store-isolation.sh` proves (1) and (2) with real connections.
+
+**What it returns.** Trimmed objects (id, status, totals, customer name, line items), not the raw WooCommerce JSON, which is several KB per order. Every tool declares an `outputSchema`. `list_orders date="today"` uses the store's timezone (`Asia/Kolkata`), not UTC. A store error comes back as a readable tool error, for example `WooCommerce at http://… returned 404 woocommerce_rest_shop_order_invalid_id: Invalid ID.`
+
+Try it from your laptop:
+
+```powershell
+kubectl -n store-default port-forward svc/store-default-woo-mcp 3001:80
+# token: kubectl -n store-default get secret store-default-credentials -o jsonpath="{.data.mcp-token}" (base64)
+npx @modelcontextprotocol/inspector@2.8.0 --cli http://localhost:3001/mcp --header "Authorization: Bearer <token>" --method tools/list
+```
 
 ## 7. Troubleshooting
 

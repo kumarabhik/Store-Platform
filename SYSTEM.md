@@ -11,7 +11,7 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 
 | # | Invariant | Why |
 |---|---|---|
-| I1 | **Every tool call goes through `GatewayCore.callTool()`**, from both `/mcp` and the chat agent. No other code talks to upstream MCP servers. | Policy, timeouts and audit cannot drift apart. It is also an assignment requirement ("nothing else talks to the upstream servers directly"). |
+| I1 | **Every tool call goes through `GatewayCore.callTool()`** ([gateway/core.ts](backend-node/src/gateway/core.ts)), from both `/mcp` and the chat agent. No other code talks to upstream MCP servers (the health checker only lists tools, through the same client pool). | Policy, timeouts and audit cannot drift apart. It is also an assignment requirement ("nothing else talks to the upstream servers directly"). |
 | I2 | **Every `callTool` writes exactly one `audit_log` row**, including denied, not-found, timeout and error outcomes. | Assignment requirement and the demo depends on it. Write the audit row in a `finally`. |
 | I3 | **No token passthrough.** The client's `Authorization` header is never forwarded upstream. Upstreams get only their own stored credential. | MCP spec forbids passthrough; confused-deputy defence. |
 | I4 | **Upstream credentials never leave the server**: not in API responses, not in logs, not in error messages, not in the browser. | Assignment requirement. The API returns only `has_credential: true`. |
@@ -96,6 +96,7 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Fix:** run the API in its container (the normal path, which is what `ops/up.ps1` does). To run it on the host, `npm --prefix backend-node rebuild better-sqlite3` for the host's Node. For route-level checks without a DB, use `app.inject()` in a test (that is how the `FEATURE_LEGACY_SAAS` gate was verified).
 - **Note:** host Node 24.5.0 is intentional. `ops/up.ps1` selects it via nvm because the dashboard's Vite needs Node ≥ 20.19. Don't downgrade the host to 20.
 - **Carry forward:** backend tests that need SQLite must run in the Node 20 container, or after a host rebuild of `better-sqlite3`.
+- **Update 2026-10-10:** the host rebuild does **not** work on this machine. `better-sqlite3` 9.x has no prebuilt binary for Node 24 (ABI 137), and compiling needs Visual Studio C++ build tools (`gyp ERR! not ok`). The rebuild attempt also removed the old host binary, which was unusable anyway; the API image is unaffected because its Dockerfile runs its own `npm ci`. Use **`bash scripts/test-backend.sh`**: Node 20 Alpine in Docker, Linux `node_modules` in a named volume. SQLite suites use `describe.skipIf(!sqliteAvailable)` ([test/sqlite.ts](backend-node/test/sqlite.ts)), so host `npm test` still passes and prints why they skipped. Upgrading to `better-sqlite3` 12 (Node 24 prebuilds) would fix the host, but it is a production dependency change: owner's call.
 
 ### L14 — Deleting Docker's data leaves a stale minikube profile, and `minikube start` hangs
 - **Symptom:** `minikube start` sits on `Pulling base image v0.0.47 ...` for 20+ minutes; `minikube status` says `No such container: minikube`.
@@ -119,6 +120,68 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Cause:** hostPath-backed provisioners (minikube-hostpath, k3s local-path) ignore `fsGroup`, so the volume root stays owned by root. Running as uid 33, the image's first-start `tar` copies every file but cannot chmod the root dir, and exits non-zero. On restart the files exist, so it skips the copy and works. MariaDB (uid 999) is not affected.
 - **Fix:** `volume-permissions` init container: runs as root with **only** the `CHOWN` capability, chowns just the mount root (not recursive), and only if it isn't already uid 33 (`wordpress.volumePermissions.enabled`, default true). After the fix: fresh install with 0 restarts.
 
+### L18 — WooCommerce OAuth signatures use the store's **home URL**, not the URL you call
+- **Symptom (avoided, found by reading the source first):** woo-mcp calls `http://store-default-wordpress.store-default.svc…/wp-json/wc/v3/…`. Signing that URL gives `401 Invalid signature - provided signature does not match`.
+- **Cause:** `WC_REST_Authentication::check_oauth_signature` rebuilds the base string from `get_home_url(null, $request_path, is_ssl() ? 'https' : 'http')`, i.e. the public `home` option (`http://store.127.0.0.1.nip.io:8088`) with the **scheme of the incoming request**. In-cluster requests are plain HTTP, so even an `https://` prod home is signed as `http://`.
+- **Fix:** woo-mcp has two settings: `WOO_BASE_URL` (where requests go) and `WOO_HOME_URL` (what is signed). Base string = `<scheme of WOO_BASE_URL>//<host of WOO_HOME_URL>/wp-json/wc/v3/<path>`. Only query + `oauth_*` params are signed; the JSON body is not (WC signs `$_GET` + `$_POST`, and JSON is not `$_POST`). Test vectors in `oauth1.test.ts` came from WC's own PHP run in the store pod (`kubectl exec -i … -- php < script.php`).
+- **Where:** [mcp-servers/woo-mcp/src/woo.ts](mcp-servers/woo-mcp/src/woo.ts), [oauth1.ts](mcp-servers/woo-mcp/src/oauth1.ts).
+- **Carry forward:** the chart must pass `publicUrl` as `WOO_HOME_URL`. If `publicUrl` changes, both the init job (home option) and woo-mcp must get the new value in the same upgrade.
+
+### L19 — WooCommerce `after` / `before` are exclusive
+- **Cause:** the v3 CRUD controller passes them straight into a `date_query` without `inclusive`, so `after=2026-10-09T00:00:00` misses an order at exactly midnight.
+- **Fix:** one calendar day is `after=<previous day>T23:59:59`, `before=<next day>T00:00:00`, in store-local time (no `dates_are_gmt`). [dates.ts](mcp-servers/woo-mcp/src/dates.ts).
+
+### L20 — MCP Inspector 0.x CLI is broken from npx; use 2.x
+- **Symptom:** `npx @modelcontextprotocol/inspector@0.17.2 --cli …` → `Cannot find module …\inspector\cli\package.json`.
+- **Fix:** use `@modelcontextprotocol/inspector@2.8.0 --cli <url> --header "Authorization: Bearer …" --method tools/call --tool-name … --tool-arg k=v`. Note `--tool-arg x=499` sends a **number**; quote it as `'x="499"'` for string args.
+
+### L21 — A connect-time DNS hook never sees literal IPs
+- **Symptom (caught while writing it):** the SSRF guard installs a custom `lookup` in the undici Agent, so every connection's resolved address is checked. `http://127.0.0.1:3000/mcp` would still connect.
+- **Cause:** Node's `net.connect` skips `lookup` entirely when the host is already an IP.
+- **Fix:** `createGuardedFetch` also checks a literal-IP host itself before fetching. Test `gateway-ssrf.test.ts` "a real fetch to a literal loopback IP is refused".
+- **Also:** a test server on a random port (`listen(0)`) is outside the allowed ports (3000-9999), so the **port** check fails first and an address test "passes" while proving nothing. The test listens on an allowed port and asserts the server got **zero** hits. Make negative tests fail for the reason you are testing (L15).
+- **Where:** [backend-node/src/gateway/ssrf.ts](backend-node/src/gateway/ssrf.ts).
+
+### L22 — `kubectl port-forward` bypasses NetworkPolicy
+- Port-forward tunnels through the kubelet into the pod's network namespace, so `port-forward svc/store-default-woo-mcp` works even though the policy admits only platform-api. That is fine for debugging with Inspector, but it **proves nothing** about isolation. Isolation is proven only by connections from other pods (`scripts/verify-store-isolation.sh`).
+- To test "allowed from platform-api", exec into the **real** platform-api pod. A throwaway pod labelled `app=platform-api` would also match the platform-api Service selector and receive live API traffic.
+
+### L23 — `minikube image build backend-node` spent ~10 minutes copying `node_modules`
+- **Symptom:** the API image build hung for 10+ minutes before Docker even started (`docker build` inside minikube showed an age of 2 min after 12 min wall time).
+- **Cause:** no `.dockerignore`, so the whole build context (host `node_modules` ≈ 100 MB, `dist`) was uploaded into the minikube VM, although the Dockerfile only copies `package*.json`, `tsconfig.json` and `src`.
+- **Fix:** [backend-node/.dockerignore](backend-node/.dockerignore) (`node_modules`, `dist`, `test`, `*.db`). Every image directory needs one (woo-mcp has it).
+
+### L24 — A skipped Vitest `describe` still runs its body
+- **Symptom:** host `npm test` reported `1 failed` for `gateway-core.test.ts`, although the suite was `describe.skipIf(!sqliteAvailable)`.
+- **Cause:** Vitest executes every `describe` callback to collect its tests, skipped or not. That body opened SQLite.
+- **Fix:** do setup only inside `beforeAll`/`it`, or return early from the body after registering an `it.skip` with the reason (as in `gateway-core.test.ts`).
+
+### L25 — Keep regex sources ASCII; build invisible-character classes from code points
+- **Symptom:** `TS1161: Unterminated regular expression literal` in `catalog.ts`.
+- **Cause:** the file ended up with the raw characters (U+200B…U+2028) where `​`-style escapes were meant. U+2028 is a line terminator, so it splits a regex literal in two.
+- **Fix:** build the class with `String.fromCharCode` from numeric ranges (`INVISIBLE` in [catalog.ts](backend-node/src/gateway/catalog.ts)). Check with `grep -nP '[^\x00-\x7F]'` (from Git Bash with a UTF-8 locale).
+
+### L26 — New pods stuck in `ContainerCreating` after the cluster has run ~1 day (Calico)
+- **Symptom:** `kubectl describe pod` → `FailedCreatePodSandBox … plugin type="calico" failed (add): error getting ClusterInformation: connection is unauthorized: Unauthorized`. Existing pods keep running; only **new** pods fail, so a `helm upgrade` or `rollout restart` hangs (`1 old replicas are pending termination`).
+- **Cause:** the Calico CNI plugin on the node uses a ServiceAccount token that expires; calico-node refreshes it, but on a long-running minikube it can go stale.
+- **Fix:** `kubectl -n kube-system rollout restart ds/calico-node`, then the stuck pods start within seconds. Seen after 26 h of uptime on 2026-10-10.
+
+### L27 — Groq free tier: 8 000 tokens per minute, and every chat turn sends all tool schemas
+- **Symptom:** the third chat question in a minute ended with `LLM at api.groq.com returned 429: Rate limit reached for model openai/gpt-oss-120b … tokens per minute (TPM): Limit 8000, Used 5589, Requested 2512. Please try again in 757.5ms`, even after retries.
+- **Cause:** each LLM request carries the system prompt plus all 22 tool schemas (~2.5k tokens), so 3–4 requests fill the per-minute window. The suggested wait (~0.8 s) is too short for the window to free enough tokens.
+- **Fix:** retries now wait `max(Retry-After, 2.5 s · 2^n)`, capped at 20 s, ± 20% jitter, up to 3 times (fits the 120 s chat budget) ([chat/llm.ts](backend-node/src/chat/llm.ts)). Before a demo: pace questions, use a paid tier, or a smaller tool list (S4 search mode would cut the tokens per turn the most).
+- **Also:** check `GET /openai/v1/models` from the pod before the demo (G3). On 2026-10-10 `openai/gpt-oss-120b` was live.
+
+### L28 — The dashboard image would bake in a dev API address from `dashboard/.env`
+- **Symptom (caught before it happened):** `dashboard/.env` sets `VITE_API_BASE`. Vite inlines it at build time, and the Dockerfile's `COPY . .` would have copied it into the image, so the in-cluster dashboard would call the developer's API address instead of its own `/api` proxy.
+- **Fix:** [dashboard/.dockerignore](dashboard/.dockerignore) excludes `.env` and `.env.*` (and `node_modules`, `dist`, see L23). Without `VITE_API_BASE` the app tries same-origin `/api` first.
+- **Carry forward:** anything `VITE_*` is public and build-time. Never put a secret there, and keep env files out of image build contexts.
+
+### L29 — Dashboard lint: `react-hooks/set-state-in-effect` and `erasableSyntaxOnly`
+- **Symptom:** `npm run lint` failed with "Calling setState synchronously within an effect" on `useEffect(() => { void loadFirst(); }, [loadFirst])`, although `loadFirst` only sets state after an `await`; the same shape passed in other pages. Separately `tsc -b` failed with `TS1294: This syntax is not allowed when 'erasableSyntaxOnly' is enabled` on `constructor(readonly status: number)`.
+- **Cause:** the React Compiler lint rule can't always see that the setState is behind an `await` in a `useCallback` defined elsewhere. The dashboard's tsconfig enables `erasableSyntaxOnly`, which forbids TypeScript-only runtime syntax (parameter properties, enums).
+- **Fix:** define the async loader **inside** the effect (with a `cancelled` flag, which also drops stale results when filters change), reset state in the event handler instead of in an effect ([pages/Audit.tsx](dashboard/src/pages/Audit.tsx)); declare class fields explicitly ([lib/api.ts](dashboard/src/lib/api.ts)).
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)
@@ -139,7 +202,7 @@ WooCommerce docs: Basic auth or query-string `consumer_key`/`consumer_secret` ar
 ### G4 — MCP spec moved to stateless (2026-07-28)
 The 2026-07-28 revision removed `Mcp-Session-Id`, the `initialize` handshake, `ping`, and SSE resumability. It added `server/discover`, `resultType`, and required `Mcp-Method`/`Mcp-Name` headers. Many clients still speak 2025-06-18/2025-11-25 (with `initialize`).
 - **Fix:** use the official SDK, run the gateway **stateless** (`sessionIdGenerator: undefined`, new server per request), and let the SDK negotiate. Test with **both** MCP Inspector and Claude Code before the demo.
-- Record the pinned SDK version here once chosen: `@modelcontextprotocol/sdk@<TBD>`.
+- Pinned SDK version: `@modelcontextprotocol/sdk@1.32.1` (woo-mcp, 2026-10-09). Its subpath imports need `"module"/"moduleResolution": "Node16"` in tsconfig; the old `"Node"` resolution ignores package `exports`. The stateless server answers `tools/list` without a prior `initialize`.
 
 ### G5 — Streaming through ingress-nginx gets buffered
 SSE / streamed responses from `/mcp` and `/api/chat` are held back by nginx's proxy buffering, and long calls hit the 60s default read timeout.
@@ -164,7 +227,7 @@ Git on Windows warns `LF will be replaced by CRLF`. A `.sh` with CRLF fails on L
 - **Fix:** add `.gitattributes` with `*.sh text eol=lf`, `*.yaml text eol=lf`, `*.tpl text eol=lf`, `Dockerfile text eol=lf`.
 
 ### G11 — Windows PowerShell 5.1 quirks (for humans and agents running commands)
-No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`. In scripts with `$ErrorActionPreference = "Stop"`, **any stderr from a native command (kubectl, helm) aborts the script, even with `2>$null`**. Probe with commands that don't error (list and filter) instead of `kubectl get <missing-thing>`. `Set-Content` writes ANSI by default, so pass `-Encoding utf8`. Run scripts with `powershell -ExecutionPolicy Bypass -File …`.
+No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`. In scripts with `$ErrorActionPreference = "Stop"`, **any stderr from a native command (kubectl, helm) aborts the script, even with `2>$null`**. Probe with commands that don't error (list and filter) instead of `kubectl get <missing-thing>`. `Set-Content` writes ANSI by default, so pass `-Encoding utf8`. Run scripts with `powershell -ExecutionPolicy Bypass -File …`. `kubectl cp C:\…` fails ("one of src or dest must be a local file specification") because of the drive colon; pipe instead: `kubectl exec -i <pod> -- php < script.php`. From Git Bash, `docker run -v` needs `$(pwd -W)` and `MSYS_NO_PATHCONV=1`.
 
 ### G12 — nip.io needs internet DNS
 `*.127.0.0.1.nip.io` resolves via public DNS. When offline, or behind DNS that blocks rebinding (some routers, corporate DNS), it fails. Fallback: add hosts-file entries for `dashboard.local.test`, `store.local.test` and switch `baseDomain` in values.
@@ -194,11 +257,18 @@ No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`.
 | Upstream tool-call timeout | 15 s (per server, configurable) | DESIGN §6.7 |
 | Health probe interval / timeout | 15 s ±20% / 3 s; backoff cap 5 min | DESIGN §6.6 |
 | woo-mcp → WordPress timeout | 10 s | DESIGN §6.7 |
-| Chat loop | ≤ 8 tool rounds, 120 s | DESIGN §7.4 |
+| Chat loop | ≤ 8 tool rounds, 120 s, ≤ 4 parallel tool calls; model `openai/gpt-oss-120b` (Groq) | chat/agent.ts, values `LLM_*` |
+| Per-key `/mcp` limit | burst 120, refill 2/s, 429 + Retry-After | values `MCP_KEY_RATE_LIMIT_*` |
 | Max tool result size | 256 KB | DESIGN §6.4 |
 | API key format | `mcpgw_<8>_<43>` | DESIGN §8.2 |
 | Max stores (default / local) | 3 / 50 | values*.yaml |
-| Local URLs | dashboard `http://127.0.0.1:5173` (dev), default store `http://store.127.0.0.1.nip.io:8088`, provisioned stores `http://store-<id>.127.0.0.1.nip.io:8088`, API `http://127.0.0.1:8080` | ops/up.ps1 |
+| Local URLs | dashboard `http://dashboard.127.0.0.1.nip.io:8088` (in-cluster) or `http://127.0.0.1:5173` (Vite dev), gateway `http://api.127.0.0.1.nip.io:8088/mcp`, default store `http://store.127.0.0.1.nip.io:8088`, provisioned stores `http://store-<id>.127.0.0.1.nip.io:8088`, API `http://127.0.0.1:8080` | ops/up.ps1 |
+| woo-mcp | port 3000, Service `<release>-woo-mcp`:80, image `store-platform/woo-mcp:dev` (local, `pullPolicy: Never`), uid 10001, `/readyz` timeout 2 s, WP timeout 10 s | charts/store-woocommerce |
+| Upstreams (release `upstreams`, ns `mcp-servers`) | `notes-mcp` :3000 (PVC `notes-mcp-data`, Recreate), `everything-mcp` :3001 (`server-everything@2026.8.31`); Services on :80; token Secret `upstreams-credentials` key `notes-mcp-token` | charts/mcp-upstreams |
+| Seeded gateway servers | `woo`, `notes`, `everything` (22 tools) | charts/platform `GATEWAY_SEED_SERVERS` |
+| Signup / invites | `AUTH_OPEN_SIGNUP=false`; invite link `DASHBOARD_PUBLIC_URL/?invite=<token>`, 7 days, single use | charts/platform, team/invites.ts |
+| Dashboard | image `store-platform/dashboard:dev` on `nginxinc/nginx-unprivileged:1.27-alpine`, uid 101, port 8080, `/healthz`; nginx proxies `/api/*` → platform-api with the prefix stripped | charts/platform `dashboard-*.yaml` |
+| Gateway encryption key | Secret `gateway-enc-key`, key `key`, 32 random bytes base64 → env `GATEWAY_ENC_KEY` | charts/platform |
 | Default store | release/namespace `store-default`; images `wordpress:7.1.3-php8.3-apache`, `wordpress:cli-2.12.0-php8.3`, `mariadb:11.4.13`; WooCommerce 11.2.0 (latest at install, unpinned) | charts/store-woocommerce |
 | Store install time | ~1 min with cached images; first pull ~5 min | measured 2026-10-09 |
 
@@ -218,7 +288,11 @@ kubectl -n store-<id> logs job/helm-install-<id>
 helm template platform charts/platform -f charts/platform/values.yaml -f charts/platform/values-local.yaml
 # test an MCP server from your laptop
 kubectl -n store-default port-forward svc/store-default-woo-mcp 3001:80
-npx @modelcontextprotocol/inspector   # connect to http://localhost:3001/mcp (Streamable HTTP)
+npx @modelcontextprotocol/inspector@2.8.0   # UI; connect to http://localhost:3001/mcp (Streamable HTTP) + Bearer header
+npx @modelcontextprotocol/inspector@2.8.0 --cli http://localhost:3001/mcp --header "Authorization: Bearer <mcp-token>" --method tools/list
+# run woo-mcp on the host against the default store (credentials: Secret store-default-credentials)
+kubectl -n store-default port-forward svc/store-default-wordpress 8091:80
+# env: WOO_BASE_URL=http://127.0.0.1:8091 WOO_HOME_URL=http://store.127.0.0.1.nip.io:8088 WOO_CONSUMER_KEY WOO_CONSUMER_SECRET WOO_MCP_TOKEN
 ```
 
 ---

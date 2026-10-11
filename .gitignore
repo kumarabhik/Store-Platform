@@ -51,6 +51,9 @@ docker-compose.override.yml
 charts/**/tmp/
 charts/**/charts/
 
+# Generated code knowledge graph (graphify)
+graphify-out/
+
 # Misc
 *.zip
 *.tar

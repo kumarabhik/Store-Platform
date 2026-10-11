@@ -1,0 +1,6 @@
+node_modules
+dist
+# Local env files would bake a dev API address (VITE_API_BASE) into the image; the in-cluster
+# dashboard must use the same-origin /api proxy instead.
+.env
+.env.*

@@ -1,0 +1,35 @@
+# Upstream MCP servers in their own namespace (mcp-servers). Only the gateway may call them.
+# Environment differences go in values-local.yaml / values-prod.yaml only.
+
+notes:
+  enabled: true
+  image: ghcr.io/kumarabhik/notes-mcp:0.1.0
+  pullPolicy: IfNotPresent
+  persistence:
+    size: 256Mi
+  # Needed on hostPath-style storage (minikube, k3s local-path), which ignores fsGroup (SYSTEM.md L17).
+  volumePermissions:
+    enabled: true
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+everything:
+  enabled: true
+  image: ghcr.io/kumarabhik/everything-mcp:2026.8.31
+  pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+# Name of an existing Secret with key "notes-mcp-token". Empty: generated once and kept (lookup).
+existingSecret: ""
+
+storageClassName: ""
+
+networkPolicy:
+  enabled: true
+  platformNamespace: platform
+  # Labels of the platform-api pods; the only pods allowed to call these servers.
+  platformApiPodLabels:
+    app: platform-api

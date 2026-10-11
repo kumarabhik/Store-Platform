@@ -1,0 +1,115 @@
+{{- if .Values.notes.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notes-mcp-data
+  labels:
+    {{- include "upstreams.labels" . | nindent 4 }}
+  annotations:
+    # Team notes must survive `helm uninstall` / reinstall.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.notes.persistence.size | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes-mcp
+  labels:
+    {{- include "upstreams.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "upstreams.selectorLabels" (dict "ctx" . "component" "notes-mcp") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-mcp
+  labels:
+    {{- include "upstreams.labels" . | nindent 4 }}
+    app.kubernetes.io/component: notes-mcp
+spec:
+  replicas: 1
+  # SQLite on a ReadWriteOnce volume: one writer, and the old pod must release it first (SYSTEM.md G9).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "upstreams.selectorLabels" (dict "ctx" . "component" "notes-mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "upstreams.selectorLabels" (dict "ctx" . "component" "notes-mcp") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "upstreams.podSecurityContext" . | nindent 8 }}
+      {{- if .Values.notes.volumePermissions.enabled }}
+      # Chowns only the mount root, only if needed, with CHOWN as the sole capability (SYSTEM.md L17).
+      initContainers:
+        - name: volume-permissions
+          image: {{ .Values.notes.image }}
+          imagePullPolicy: {{ .Values.notes.pullPolicy }}
+          command: ["sh", "-c", "[ \"$(stat -c %u /data)\" = 10001 ] || chown 10001:10001 /data"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
+      containers:
+        - name: notes-mcp
+          image: {{ .Values.notes.image }}
+          imagePullPolicy: {{ .Values.notes.pullPolicy }}
+          securityContext:
+            {{- include "upstreams.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PORT
+              value: "3000"
+            - name: NOTES_DB_PATH
+              value: /data/notes.db
+            - name: NOTES_MCP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ include "upstreams.secretName" . }}, key: notes-mcp-token }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.notes.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: notes-mcp-data
+{{- end }}

@@ -28,10 +28,22 @@ import { computeMetrics, renderPrometheus } from "./metrics.js";
 import { startReconciler } from "./provisioner";
 import { makeTokenBucket } from "./ratelimit";
 import { suggestContent } from "./ai";
+import { createGatewayCore } from "./gateway/core";
+import { loadEncKey } from "./gateway/crypto";
+import { createHealthChecker } from "./gateway/health";
+import { registerMcpEndpoint } from "./gateway/mcpEndpoint";
+import { createRegistry } from "./gateway/registry";
+import { registerServerRoutes } from "./gateway/routes";
+import { parseSeedServers, startSeeding } from "./gateway/seed";
+import { createGuardedFetch, ssrfPolicyFromEnv } from "./gateway/ssrf";
+import { createUpstreamPool } from "./gateway/upstreams";
+import { applyAdminEmails, roleOf as storedRoleOf, signupRole } from "./team/members";
+import { registerTeamRoutes } from "./team/routes";
+import { createLlm, llmConfigFromEnv } from "./chat/llm";
+import { registerChatRoutes } from "./chat/routes";
 
-type CurrentUser = PublicUser & {
-  role: "admin" | "member";
-};
+// PublicUser carries the stored role (users.role); see team/members.ts for how it is assigned.
+type CurrentUser = PublicUser;
 
 type StoreRow = {
   id: string;
@@ -132,6 +144,10 @@ async function main() {
   const trustProxy = parseBoolean(process.env.TRUST_PROXY, isProduction);
   const rateLimitEnabled = parseBoolean(process.env.RATE_LIMIT_ENABLED, true);
   const LEGACY_SAAS = parseBoolean(process.env.FEATURE_LEGACY_SAAS, false);
+  // After the first admin exists, signup is invite-only unless this is true (DESIGN §8.1).
+  const AUTH_OPEN_SIGNUP = parseBoolean(process.env.AUTH_OPEN_SIGNUP, false);
+  // Public URL of /mcp that external clients use; the dashboard's Connect page shows it.
+  const GATEWAY_PUBLIC_URL = process.env.GATEWAY_PUBLIC_URL?.trim() || null;
 
   const globalLimiter = makeTokenBucket({
     capacity: parsePositiveInt(process.env.RATE_LIMIT_CAPACITY, 60),
@@ -168,10 +184,8 @@ async function main() {
   const kube = makeKubeClients();
   await fs.mkdir(BACKUP_DIR, { recursive: true });
 
-  const decorateUser = (user: PublicUser): CurrentUser => ({
-    ...user,
-    role: ADMIN_EMAILS.has(user.email.toLowerCase()) ? "admin" : "member",
-  });
+  // The role is read from users.role; an email in ADMIN_EMAILS is promoted (and stored) on sight.
+  const decorateUser = (user: PublicUser): CurrentUser => applyAdminEmails(db, user, ADMIN_EMAILS);
 
   const isAdminRequest = (req: FastifyRequest) =>
     !!ADMIN_API_KEY && !!extractApiKey(req) && timingSafeEquals(extractApiKey(req), ADMIN_API_KEY);
@@ -375,8 +389,60 @@ async function main() {
 
   registerLegacySaasGate(app, LEGACY_SAAS);
 
+  // MCP gateway (DESIGN §6-7.3). Upstream traffic only flows through GatewayCore (SYSTEM.md I1).
+  const ssrfPolicy = ssrfPolicyFromEnv();
+  const registry = createRegistry(db, loadEncKey(), ssrfPolicy);
+  const upstreamPool = createUpstreamPool({ fetch: createGuardedFetch(ssrfPolicy) });
+  const health = createHealthChecker(db, registry, upstreamPool);
+  const gateway = createGatewayCore(db, registry, upstreamPool, health);
+  registerMcpEndpoint(app, {
+    db,
+    core: gateway,
+    roleOf: (user) => storedRoleOf(db, user.id),
+    allowedOrigins: [...parseStringSet(process.env.GATEWAY_ALLOWED_ORIGINS)],
+    keyLimiter: makeTokenBucket({
+      capacity: parsePositiveInt(process.env.MCP_KEY_RATE_LIMIT_CAPACITY, 120),
+      refillPerSec: parsePositiveFloat(process.env.MCP_KEY_RATE_LIMIT_REFILL_PER_SEC, 2),
+      ttlMs: 15 * 60_000,
+      maxKeys: 10_000,
+    }),
+  });
+  registerServerRoutes(app, {
+    db,
+    registry,
+    health,
+    pool: upstreamPool,
+    callerOf: (req) => (isAdminRequest(req) ? { role: "admin" } : currentUserOf(req)),
+  });
+  // Chat agent (DESIGN §7.4): an LLM tool loop that calls tools through GatewayCore as the user.
+  const llmConfig = llmConfigFromEnv();
+  if (!llmConfig) app.log.warn("chat: no LLM_API_KEY/GROQ_API_KEY set, /api/chat will answer 503");
+  registerChatRoutes(app, {
+    deps: { core: gateway, llm: llmConfig ? createLlm(llmConfig) : null, timezone: process.env.CHAT_TIMEZONE?.trim() || "UTC" },
+    currentUser: currentUserOf,
+  });
+  registerTeamRoutes(app, {
+    db,
+    currentUser: currentUserOf,
+    createSession: (userId) => createSession(db, userId),
+    dashboardUrl: DASHBOARD_PUBLIC_URL,
+  });
+  health.start();
+  const stopSeeding = startSeeding(
+    registry,
+    health,
+    parseSeedServers(process.env.GATEWAY_SEED_SERVERS),
+    async ({ namespace, name, key }) => {
+      const { body } = await kube.core.readNamespacedSecret(name, namespace);
+      const value = body.data?.[key];
+      if (!value) throw new Error(`Gateway seed: Secret ${namespace}/${name} has no key '${key}'`);
+      return Buffer.from(value, "base64").toString("utf8");
+    },
+    app.log,
+  );
+
   app.get("/healthz", async () => ({ ok: true }));
-  app.get("/config", async () => ({ features: { legacySaas: LEGACY_SAAS } }));
+  app.get("/config", async () => ({ features: { legacySaas: LEGACY_SAAS }, gateway: { url: GATEWAY_PUBLIC_URL } }));
   app.get("/metrics", async (_req, reply) => {
     reply.header("content-type", "text/plain; version=0.0.4");
     return renderPrometheus(computeMetrics(db));
@@ -393,7 +459,14 @@ async function main() {
     if (!parsed.success) return reply.code(400).send(parsed.error.flatten());
     if (findUserByEmail(db, parsed.data.email)) return reply.code(409).send({ error: "email_taken" });
 
-    const user = createUser(db, parsed.data);
+    // First account (no active admin yet) becomes admin; after that, invites only, unless
+    // AUTH_OPEN_SIGNUP. Operators can still let an ADMIN_EMAILS address sign up directly.
+    const isAdminEmail = ADMIN_EMAILS.has(parsed.data.email.trim().toLowerCase());
+    const role = isAdminEmail ? "admin" : signupRole(db, AUTH_OPEN_SIGNUP);
+    if (!role) {
+      return reply.code(403).send({ error: "signup_closed", message: "Signup is closed. Ask an admin for an invite link." });
+    }
+    const user = createUser(db, parsed.data, role);
     ensureBillingAccount(db, user);
     return { token: createSession(db, user.id), user: decorateUser(user) };
   });
@@ -847,6 +920,9 @@ async function main() {
   });
 
   app.addHook("onClose", async () => {
+    stopSeeding();
+    health.stop();
+    await upstreamPool.closeAll();
     stopReconciler();
     db.close();
   });

@@ -1,3 +1,4 @@
+{{- if .Values.dashboard.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,16 +12,56 @@ spec:
     metadata:
       labels:
         app: {{ include "platform.dashboardName" . }}
+      annotations:
+        # Restart when the nginx config changes; nginx reads it only at start.
+        checksum/nginx: {{ include (print $.Template.BasePath "/dashboard-configmap.yaml") . | sha256sum }}
     spec:
+      # Static files only: no Kubernetes API access needed.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: dashboard
           image: {{ .Values.dashboard.image | quote }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.dashboard.imagePullPolicy | quote }}
           ports:
-            - containerPort: 80
+            - name: http
+              containerPort: 8080
           readinessProbe:
             httpGet:
-              path: /
-              port: 80
-            initialDelaySeconds: 5
-            periodSeconds: 5
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.dashboard.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            # nginx writes its pid and temp files under /tmp (unprivileged image).
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: {{ include "platform.dashboardName" . }}-nginx
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

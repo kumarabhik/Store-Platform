@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mcp-upstreams
+description: Extra upstream MCP servers for the gateway (notes-mcp, everything reference server)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

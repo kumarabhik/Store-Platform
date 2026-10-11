@@ -1,0 +1,11 @@
+{
+  "name": "everything-mcp",
+  "private": true,
+  "description": "Image wrapper for the official MCP reference server (@modelcontextprotocol/server-everything), the gateway's third-party upstream",
+  "scripts": {
+    "start": "mcp-server-everything streamableHttp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server-everything": "2026.8.31"
+  }
+}

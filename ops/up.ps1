@@ -70,13 +70,26 @@ function Deploy-Platform {
   if (-not $SkipImageBuild) {
     Write-Host "Building API image in Minikube..."
     minikube image build -t store-platform/api-node:dev backend-node | Out-Host
+    # The default store's MCP server; values-local.yaml uses it with pullPolicy Never.
+    Write-Host "Building woo-mcp image in Minikube..."
+    minikube image build -t store-platform/woo-mcp:dev mcp-servers/woo-mcp | Out-Host
+    Write-Host "Building notes-mcp and everything-mcp images in Minikube..."
+    minikube image build -t store-platform/notes-mcp:dev mcp-servers/notes-mcp | Out-Host
+    minikube image build -t store-platform/everything-mcp:dev mcp-servers/everything-mcp | Out-Host
+    Write-Host "Building dashboard image in Minikube..."
+    minikube image build -t store-platform/dashboard:dev dashboard | Out-Host
   } else {
     Write-Host "Skipping image build by request."
   }
 
   Write-Host "Installing/upgrading platform chart..."
   helm upgrade --install platform ./charts/platform -n platform --create-namespace -f ./charts/platform/values-local.yaml -f $helmEnvOverrideFile --set api.image=store-platform/api-node:dev | Out-Host
+  if (-not $SkipImageBuild) {
+    # Same :dev tags after a rebuild, so Kubernetes would keep the old containers (SYSTEM.md L12).
+    kubectl -n platform rollout restart deploy/platform-api deploy/platform-dashboard | Out-Host
+  }
   kubectl -n platform rollout status deploy/platform-api --timeout=300s | Out-Host
+  kubectl -n platform rollout status deploy/platform-dashboard --timeout=300s | Out-Host
 }
 
 function Test-LocalPortListening {
@@ -180,11 +193,20 @@ Use-PreferredNode
 Ensure-Minikube
 Deploy-Platform
 Install-DefaultStore
+Write-Host "Installing/upgrading upstream MCP servers (notes-mcp, everything-mcp)..."
+helm upgrade --install upstreams ./charts/mcp-upstreams -n mcp-servers --create-namespace `
+  -f ./charts/mcp-upstreams/values-local.yaml --wait --timeout 5m | Out-Host
+if (-not $SkipImageBuild) {
+  # Same :dev tag after a rebuild, so Kubernetes would keep the old container (SYSTEM.md L12).
+  kubectl -n store-default rollout restart deploy/store-default-woo-mcp | Out-Host
+  kubectl -n mcp-servers rollout restart deploy/notes-mcp deploy/everything-mcp | Out-Host
+}
 Start-LocalDev
 
 Write-Host ""
 Write-Host "Up complete."
-Write-Host "Dashboard: http://127.0.0.1:5173"
+Write-Host "Dashboard: http://dashboard.127.0.0.1.nip.io:8088  (in-cluster; Vite dev server: http://127.0.0.1:5173)"
+Write-Host "Gateway:   http://api.127.0.0.1.nip.io:8088/mcp"
 Write-Host "API:       http://127.0.0.1:8080/healthz"
 Write-Host "Store:     http://store.127.0.0.1.nip.io:8088  (admin: /wp-admin, user 'admin')"
 Write-Host "Stores:    http://store-<id>.127.0.0.1.nip.io:8088"

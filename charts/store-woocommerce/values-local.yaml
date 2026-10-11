@@ -10,5 +10,10 @@ site:
   title: "Urumi Demo Store"
   adminEmail: admin@store.127.0.0.1.nip.io
 
+wooMcp:
+  # Built inside minikube by ops/up.ps1 (`minikube image build`), never pulled.
+  image: store-platform/woo-mcp:dev
+  pullPolicy: Never
+
 networkPolicy:
   ingressControllerNamespace: ingress-nginx

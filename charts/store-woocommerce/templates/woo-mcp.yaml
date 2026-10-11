@@ -1,0 +1,117 @@
+{{- if .Values.wooMcp.enabled }}
+# This store's MCP server (DESIGN §7.1). Internal only: ClusterIP, no Ingress, and a NetworkPolicy
+# that admits only the gateway (platform-api).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "store.fullname" . }}-woo-mcp
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "store.selectorLabels" (dict "ctx" . "component" "woo-mcp") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "store.fullname" . }}-woo-mcp
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woo-mcp
+spec:
+  replicas: 1
+  # Stateless, so a rolling update with no downtime is safe (DESIGN §10.4).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" . "component" "woo-mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "store.selectorLabels" (dict "ctx" . "component" "woo-mcp") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: woo-mcp
+          image: {{ .Values.wooMcp.image }}
+          imagePullPolicy: {{ .Values.wooMcp.pullPolicy }}
+          securityContext:
+            {{- include "store.containerSecurityContext" . | nindent 12 }}
+            # Node only reads its own files; nothing is written to disk.
+            readOnlyRootFilesystem: true
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PORT
+              value: "3000"
+            - name: WOO_BASE_URL
+              value: "http://{{ include "store.fullname" . }}-wordpress.{{ .Release.Namespace }}.svc.cluster.local"
+            # WooCommerce verifies OAuth signatures against the home URL (SYSTEM.md L18).
+            - name: WOO_HOME_URL
+              value: {{ .Values.publicUrl | quote }}
+            - name: WOO_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ include "store.secretName" . }}, key: woo-consumer-key }
+            - name: WOO_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ include "store.secretName" . }}, key: woo-consumer-secret }
+            - name: WOO_MCP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ include "store.secretName" . }}, key: mcp-token }
+          # Readiness follows the store (WordPress answers within 2 s); liveness only the process,
+          # so a store outage doesn't restart a healthy woo-mcp.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.wooMcp.resources | nindent 12 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# Only the gateway may call the MCP server. Not the storefront ingress, not other stores,
+# not other pods in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-woo-mcp
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" . "component" "woo-mcp") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # Both selectors in one entry: pods with these labels AND in the platform namespace.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.platformNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.platformApiPodLabels | nindent 14 }}
+      ports:
+        - port: 3000
+          protocol: TCP
+{{- end }}
+{{- end }}

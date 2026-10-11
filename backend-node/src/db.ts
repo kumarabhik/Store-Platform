@@ -113,6 +113,8 @@ export function openDb(path: string): Db {
   try { db.exec(`alter table stores add column domain_last_error text;`); } catch {}
   try { db.exec(`alter table stores add column last_backup_at text;`); } catch {}
 
+  migrateGateway(db);
+
   db.exec(`
     create index if not exists idx_store_events_store_ts on store_events(store_id, ts desc);
     create index if not exists idx_stores_status_created on stores(status, created_at);
@@ -126,6 +128,105 @@ export function openDb(path: string): Db {
   `);
 
   return db;
+}
+
+// MCP gateway schema (DESIGN §5). Additive only (SYSTEM.md I10): new tables and new columns, so an
+// older image still runs against this database after a `helm rollback`.
+function migrateGateway(db: Db) {
+  // Source of truth for roles (team/members.ts). ADMIN_EMAILS still promotes on login.
+  try { db.exec(`alter table users add column role text not null default 'member' check (role in ('admin','member'));`); } catch {}
+  try { db.exec(`alter table users add column disabled_at text;`); } catch {}
+
+  db.exec(`
+    create table if not exists invites (
+      id text primary key,
+      email text not null,
+      role text not null check (role in ('admin','member')),
+      token_hash text not null unique,
+      invited_by text not null references users(id),
+      expires_at text not null,
+      accepted_at text,
+      created_at text not null default (datetime('now'))
+    );
+
+    create table if not exists api_keys (
+      id text primary key,
+      user_id text not null references users(id),
+      name text not null,
+      prefix text not null unique,
+      key_hash text not null,
+      created_at text not null default (datetime('now')),
+      last_used_at text,
+      expires_at text,
+      revoked_at text,
+      revoked_by text
+    );
+
+    create table if not exists mcp_servers (
+      id text primary key,
+      slug text not null unique check (slug glob '[a-z]*' and length(slug) <= 24),
+      name text not null,
+      url text not null,
+      auth_type text not null default 'none' check (auth_type in ('none','bearer','header')),
+      auth_header_name text,
+      auth_secret_enc text,
+      enabled integer not null default 1,
+      timeout_ms integer not null default 15000,
+      managed_by text not null default 'admin' check (managed_by in ('admin','helm','provisioner')),
+      store_id text references stores(id),
+      status text not null default 'Unknown',
+      last_error text,
+      last_ok_at text,
+      last_check_at text,
+      last_latency_ms integer,
+      consecutive_failures integer not null default 0,
+      created_at text not null default (datetime('now')),
+      updated_at text not null default (datetime('now'))
+    );
+
+    create table if not exists mcp_tools (
+      server_id text not null references mcp_servers(id) on delete cascade,
+      name text not null,
+      description text,
+      input_schema text not null,
+      annotations text,
+      definition_hash text not null,
+      approved_hash text,
+      seen_at text not null,
+      primary key (server_id, name)
+    );
+
+    create table if not exists tool_policies (
+      server_id text not null references mcp_servers(id) on delete cascade,
+      tool_name text not null,
+      min_role text not null check (min_role in ('member','admin','nobody')),
+      primary key (server_id, tool_name)
+    );
+
+    -- Append-only: no UPDATE or DELETE on this table anywhere in the code (SYSTEM.md I2).
+    create table if not exists audit_log (
+      id integer primary key autoincrement,
+      ts text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      request_id text not null,
+      user_id text not null,
+      user_email text not null,
+      api_key_id text,
+      source text not null check (source in ('mcp','chat')),
+      server_id text,
+      server_slug text,
+      tool_name text not null,
+      exposed_name text not null,
+      duration_ms integer not null,
+      outcome text not null check (outcome in ('ok','tool_error','timeout','unreachable','denied','not_found','bad_request')),
+      error text,
+      args_preview text
+    );
+
+    create index if not exists idx_api_keys_user on api_keys(user_id, created_at desc);
+    create index if not exists idx_invites_email on invites(email);
+    create index if not exists idx_audit_ts on audit_log(ts desc);
+    create index if not exists idx_audit_user on audit_log(user_id, ts desc);
+  `);
 }
 
 export function addEvent(

@@ -3,13 +3,17 @@ import type { Db } from "./db";
 
 const SESSION_TTL_DAYS = 30;
 
+export type Role = "admin" | "member";
+
 export type PublicUser = {
   id: string;
   name: string;
   email: string;
+  // Stored in users.role (DESIGN §8.1). Every admin check reads it on the server (SYSTEM.md I13).
+  role: Role;
 };
 
-function normalizeEmail(email: string) {
+export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
 
@@ -33,19 +37,20 @@ export function verifyPassword(password: string, storedHash: string) {
   return timingSafeEqualsHex(actual, expected);
 }
 
-export function createUser(db: Db, input: { name: string; email: string; password: string }): PublicUser {
+export function createUser(db: Db, input: { name: string; email: string; password: string }, role: Role = "member"): PublicUser {
   const id = crypto.randomBytes(8).toString("hex");
   const email = normalizeEmail(input.email);
   const user = {
     id,
     name: input.name.trim(),
     email,
+    role,
   };
 
   db.prepare(
-    `insert into users(id, name, email, password_hash, created_at, updated_at)
-     values (?, ?, ?, ?, datetime('now'), datetime('now'))`
-  ).run(user.id, user.name, user.email, hashPassword(input.password));
+    `insert into users(id, name, email, password_hash, role, created_at, updated_at)
+     values (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+  ).run(user.id, user.name, user.email, hashPassword(input.password), role);
 
   return user;
 }
@@ -53,10 +58,11 @@ export function createUser(db: Db, input: { name: string; email: string; passwor
 export function findUserByEmail(db: Db, email: string) {
   return (
     db
-      .prepare(`select id, name, email, password_hash from users where email=? limit 1`)
+      .prepare(`select id, name, email, role, password_hash, disabled_at from users where email=? limit 1`)
       .get(normalizeEmail(email)) as
       | (PublicUser & {
           password_hash: string;
+          disabled_at: string | null;
         })
       | undefined
   );
@@ -66,7 +72,9 @@ export function authenticateUser(db: Db, email: string, password: string): Publi
   const row = findUserByEmail(db, email);
   if (!row) return null;
   if (!verifyPassword(password, row.password_hash)) return null;
-  return { id: row.id, name: row.name, email: row.email };
+  // A disabled user can't log in; same answer as a wrong password, so it reveals nothing.
+  if (row.disabled_at) return null;
+  return { id: row.id, name: row.name, email: row.email, role: row.role };
 }
 
 export function createSession(db: Db, userId: string) {
@@ -83,11 +91,12 @@ export function getUserBySessionToken(db: Db, token: string | null | undefined):
 
   const row = db
     .prepare(
-      `select u.id, u.name, u.email
+      `select u.id, u.name, u.email, u.role
        from user_sessions s
        join users u on u.id = s.user_id
        where s.token=?
          and s.expires_at > datetime('now')
+         and u.disabled_at is null
        limit 1`
     )
     .get(token) as PublicUser | undefined;

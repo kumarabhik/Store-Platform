@@ -1,0 +1,537 @@
+/* Gateway shell and pages (P7). Uses the tokens defined in App.css. */
+
+.appBar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  margin-top: 16px;
+  padding: 12px 18px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--surface-strong);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-soft);
+}
+
+.appBrand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.appBrand > div:last-child {
+  display: grid;
+  line-height: 1.2;
+}
+
+.appBrandMark {
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  font-size: 18px;
+}
+
+.appNav {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.navLink {
+  padding: 8px 14px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.navLink:hover {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.navLinkActive,
+.navLinkActive:hover {
+  color: #f6fffe;
+  background: linear-gradient(135deg, #0b6d7b 0%, #18a2a4 100%);
+}
+
+.appUser {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.appUser .pill {
+  min-height: 30px;
+}
+
+.appEmail {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.dotGood {
+  background: var(--success);
+}
+
+.dotBad {
+  background: var(--danger);
+}
+
+.appMain {
+  padding: 24px 0 48px;
+}
+
+.page {
+  display: grid;
+  gap: 18px;
+}
+
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pageHeader h2 {
+  margin: 0;
+  font-size: clamp(1.8rem, 3vw, 2.4rem);
+}
+
+.pageHeader .subtle {
+  margin: 6px 0 0;
+}
+
+.pageBanner {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+}
+
+.pageBannerInfo {
+  background: var(--success-bg);
+}
+
+.pageBannerError {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.btnSmall {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.statusPill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  background: rgba(236, 242, 247, 0.92);
+  color: #465264;
+}
+
+.tone-good {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.tone-bad {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.tone-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.tone-muted {
+  background: rgba(230, 233, 237, 0.9);
+  color: var(--muted);
+}
+
+code,
+.mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.codeBlock {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: #0f2230;
+  color: #e6f6f8;
+}
+
+.codeBlock pre {
+  flex: 1;
+  margin: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.bigCode {
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  font-size: 15px;
+}
+
+.formCard h3,
+.card > h3 {
+  margin-top: 0;
+}
+
+.formGrid,
+.filterGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.fieldWide {
+  grid-column: 1 / -1;
+}
+
+.field select,
+.dataTable select {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(19, 91, 106, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--text);
+  font: inherit;
+}
+
+.formGrid .field input,
+.filterGrid .field input,
+.inlineRow .field input {
+  min-height: 44px;
+  border-radius: 14px;
+}
+
+.inlineRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.grow {
+  flex: 1;
+  min-width: 220px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.serverList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 18px;
+}
+
+.serverCardDisabled {
+  opacity: 0.7;
+}
+
+.serverTop {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.serverTop h3 {
+  margin: 0;
+}
+
+.serverTop p {
+  margin: 4px 0 0;
+}
+
+.slug {
+  margin-left: 6px;
+  color: var(--accent-strong);
+}
+
+.factGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 16px 0 8px;
+}
+
+.factGrid dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.factGrid dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+}
+
+.serverCard .inlineError {
+  margin: 8px 0;
+}
+
+.toolList {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.dataTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.dataTable th {
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.dataTable td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.formCard .dataTable {
+  margin-top: 18px;
+}
+
+.rowMuted td {
+  opacity: 0.55;
+}
+
+.clickRow {
+  cursor: pointer;
+}
+
+.clickRow:hover td {
+  background: var(--accent-soft);
+}
+
+.detailRow td {
+  background: rgba(244, 250, 251, 0.9);
+}
+
+.detailRow p {
+  margin: 4px 0;
+}
+
+.onceBox {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: var(--warn-bg);
+}
+
+.onceBox p {
+  margin: 0 0 6px;
+}
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(10, 25, 35, 0.45);
+}
+
+.modal {
+  width: min(640px, 100%);
+  padding: 24px;
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.modal h3 {
+  margin-top: 0;
+}
+
+.chatCard {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 14px;
+  min-height: 60vh;
+}
+
+.chatLog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chatEmpty {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
+.bubble {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  color: #f6fffe;
+  background: linear-gradient(135deg, #0b6d7b 0%, #18a2a4 100%);
+}
+
+.bubble-assistant {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--line);
+}
+
+.bubble-error {
+  align-self: flex-start;
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.toolCard {
+  align-self: flex-start;
+  width: min(80%, 720px);
+  padding: 8px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  background: rgba(248, 252, 253, 0.95);
+  font-size: 13px;
+}
+
+.toolCard summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.toolOk {
+  border-left-color: var(--success);
+}
+
+.toolFail {
+  border-left-color: var(--danger);
+}
+
+.toolRunning {
+  border-left-color: var(--warn);
+}
+
+.toolPreview {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 10px;
+  background: #0f2230;
+  color: #e6f6f8;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.thinking {
+  font-style: italic;
+}
+
+.chatInput {
+  display: flex;
+  gap: 10px;
+}
+
+.chatInput input {
+  flex: 1;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid rgba(19, 91, 106, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  font: inherit;
+}
+
+@media (max-width: 760px) {
+  .appBar {
+    position: static;
+  }
+
+  .serverList {
+    grid-template-columns: 1fr;
+  }
+
+  .factGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dataTable {
+    display: block;
+    overflow-x: auto;
+  }
+
+  .bubble,
+  .toolCard {
+    width: 100%;
+    max-width: 100%;
+  }
+}

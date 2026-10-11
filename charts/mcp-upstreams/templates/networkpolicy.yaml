@@ -1,0 +1,30 @@
+{{- if .Values.networkPolicy.enabled }}
+# Every pod in this release accepts traffic only from the gateway (platform-api pods in the platform
+# namespace), and only on its MCP port. Not from other namespaces, not from each other (DESIGN §4.2).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-gateway-only
+  labels:
+    {{- include "upstreams.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-upstreams
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # Both selectors in one entry: pods with these labels AND in the platform namespace.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.platformNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.platformApiPodLabels | nindent 14 }}
+      ports:
+        - port: 3000
+          protocol: TCP
+        - port: 3001
+          protocol: TCP
+{{- end }}

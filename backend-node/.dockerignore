@@ -1,0 +1,6 @@
+# The Dockerfile copies only package*.json, tsconfig.json and src. Without this file the whole
+# host node_modules (~100 MB) is sent to minikube on every build, which took ~10 minutes.
+node_modules
+dist
+test
+*.db

@@ -60,9 +60,21 @@ init:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 512Mi }
 
+# This store's MCP server (mcp-servers/woo-mcp). Reached only by the gateway.
+wooMcp:
+  enabled: true
+  image: ghcr.io/kumarabhik/woo-mcp:0.1.0
+  pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
 networkPolicy:
   enabled: true
   # Namespace of the ingress controller pods (ingress-nginx locally, kube-system for Traefik on k3s).
   ingressControllerNamespace: ingress-nginx
   # Namespace of the platform API (gateway + provisioner readiness checks).
   platformNamespace: platform
+  # Labels of the platform-api pods; the only pods allowed to call woo-mcp.
+  platformApiPodLabels:
+    app: platform-api

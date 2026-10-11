@@ -5,6 +5,12 @@ global:
     enabled: true
     secretName: "wildcard-tls-secret"
 
+gateway:
+  encKey:
+    # Create before installing, and back it up: losing it makes stored upstream credentials unreadable.
+    #   kubectl -n platform create secret generic gateway-enc-key --from-literal=key=$(openssl rand -base64 32)
+    existingSecret: "gateway-enc-key"
+
 api:
   # Create before installing (never put credentials in this file):
   #   kubectl -n platform create secret generic platform-api-env \
@@ -15,6 +21,9 @@ api:
     INGRESS_CLASS_NAME: "nginx"
     STORE_CHART_REF: "bitnami/wordpress"
     TRUST_PROXY: "true"
+    DASHBOARD_PUBLIC_URL: "https://dashboard.your-vps-domain.com"
+    GATEWAY_PUBLIC_URL: "https://api.your-vps-domain.com/mcp"
+    CORS_ORIGINS: "https://dashboard.your-vps-domain.com"
     RATE_LIMIT_ENABLED: "true"
     RATE_LIMIT_CAPACITY: "120"
     RATE_LIMIT_REFILL_PER_SEC: "2"
@@ -23,11 +32,11 @@ api:
     CREATE_RATE_LIMIT_CAPACITY: "8"
     CREATE_RATE_LIMIT_REFILL_PER_SEC: "0.1"
     CREATE_RATE_LIMIT_TTL_SEC: "900"
-  image: "ghcr.io/you/store-platform-api:0.1.0"
+  image: "ghcr.io/kumarabhik/store-platform-api:0.1.0"
   persistence:
     enabled: true
     size: 5Gi
     storageClassName: "local-path"
 
 dashboard:
-  image: "ghcr.io/you/store-platform-dashboard:0.1.0"
+  image: "ghcr.io/kumarabhik/store-platform-dashboard:0.1.0"

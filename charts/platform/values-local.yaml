@@ -13,7 +13,9 @@ api:
     INGRESS_CLASS_NAME: "nginx"
     STORE_CHART_REF: "bitnami/wordpress"
     BACKUP_DIR: "/data/backups"
-    DASHBOARD_PUBLIC_URL: "http://127.0.0.1:5173"
+    # Invite links point at the in-cluster dashboard (through the 8088 ingress port-forward).
+    DASHBOARD_PUBLIC_URL: "http://dashboard.127.0.0.1.nip.io:8088"
+    GATEWAY_PUBLIC_URL: "http://api.127.0.0.1.nip.io:8088/mcp"
     ADMIN_EMAILS: ""
     STRIPE_PRICE_ID: ""
     STRIPE_PLAN_LABEL: "Growth"
@@ -27,11 +29,14 @@ api:
     CREATE_RATE_LIMIT_CAPACITY: "8"
     CREATE_RATE_LIMIT_REFILL_PER_SEC: "0.2"
     CREATE_RATE_LIMIT_TTL_SEC: "600"
-    CORS_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173,http://dashboard.127.0.0.1.nip.io"
+    CORS_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173,http://dashboard.127.0.0.1.nip.io:8088"
+    GATEWAY_ALLOWED_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173"
   persistence:
     enabled: true
     size: 1Gi
     storageClassName: ""
 
 dashboard:
-  enabled: false
+  enabled: true
+  # Built by ops/up.ps1 with `minikube image build`; same :dev tag, so up.ps1 restarts it (SYSTEM.md L12).
+  image: "store-platform/dashboard:dev"

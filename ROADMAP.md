@@ -8,7 +8,7 @@ Rules for this file (see [AGENTS.md](AGENTS.md)):
 - Add new items where they belong. Never delete items; strike through ~~like this~~ with a reason if dropped.
 - Design details live in [DESIGN.md](DESIGN.md) (section numbers given as §n). Lessons and gotchas go into [SYSTEM.md](SYSTEM.md).
 
-Last reviewed: 2026-10-09
+Last reviewed: 2026-10-10
 
 ---
 
@@ -17,12 +17,12 @@ Last reviewed: 2026-10-09
 |---|---|---|
 | P0 | Repo cleanup and baseline | `[x]` |
 | P1 | Store chart (own) + default store | `[x]` |
-| P2 | WooCommerce MCP server | `[ ]` |
-| P3 | Gateway core + `/mcp` endpoint | `[ ]` |
-| P4 | Two more upstream MCP servers | `[ ]` |
-| P5 | Team and access (roles, invites, API keys, audit) | `[~]` |
-| P6 | Chat agent | `[~]` |
-| P7 | Dashboard pages | `[~]` |
+| P2 | WooCommerce MCP server | `[x]` |
+| P3 | Gateway core + `/mcp` endpoint | `[x]` |
+| P4 | Two more upstream MCP servers | `[x]` |
+| P5 | Team and access (roles, invites, API keys, audit) | `[x]` |
+| P6 | Chat agent | `[x]` |
+| P7 | Dashboard pages | `[~]` (all pages built, API flows verified; browser click-through pending) |
 | P8 | Helm and K8s completeness | `[~]` |
 | P9 | Docs, threat model, demo video | `[~]` |
 | B  | Bonus: multi-store provisioning | `[~]` |
@@ -36,7 +36,7 @@ Last reviewed: 2026-10-09
 - [x] Remove leftovers: `ForceDLT.txt`, `ns.json`, `tmp-store-ingress-patch.json`, `outputs/` (notes moved to SYSTEM.md L8/L9). Proof: commit `9b1ed9b`
 - [x] Delete legacy Python `backend/` (still in git history). Proof: commit `f22cd07`
 - [x] Put Stripe billing, custom domains, backups, content suggestions and Medusa behind `FEATURE_LEGACY_SAAS` (default `false`; routes return 404 `feature_disabled`; dashboard reads `GET /config` and hides the panels; code kept). Proof: `npm run check` ✓, dashboard `build` + `lint` ✓, gate verified with `app.inject()` on Fastify 4.29.1 (both flag values). Not yet run in-cluster
-- [~] Make backend tests runnable: pure tests run on the host (`npm test`); tests that open SQLite still need the Node 20 container or a host rebuild of `better-sqlite3` (SYSTEM.md L13)
+- [x] Make backend tests runnable: pure tests run on the host (`npm test`, SQLite suites skip with a message); everything runs in Node 20 with `bash scripts/test-backend.sh` (SYSTEM.md L13). Proof: 43/43 in the container, 2026-10-10
 - [x] Move credentials out of plain Helm `env` into Secret `platform-api-env` (`envFrom` + checksum restart; SYSTEM.md L16). Proof: `kubectl get deploy platform-api` env has no `GROQ_API_KEY`/`STRIPE_SECRET_KEY`; `printenv` in the pod shows both
 - [x] Remove the Loom link appended to `.env.example` (reverted, never committed)
 - [x] Add `backend-node` test runner: vitest, `npm test`, 7 tests (legacy gate via `app.inject`, rate limiter)
@@ -58,77 +58,89 @@ Last reviewed: 2026-10-09
 - [x] Verify persistence: delete wordpress + mariadb pods → order and 3 products still there. Proof: `scripts/verify-store.sh --persistence`
 
 ## P2 — WooCommerce MCP server (DESIGN §7.1)
-- [ ] Scaffold `mcp-servers/woo-mcp` (TS, `@modelcontextprotocol/sdk`, zod, Streamable HTTP, stateless)
-- [ ] OAuth 1.0a (HMAC-SHA256) signer for WC REST over HTTP + unit test with known vectors
-- [ ] Tool `list_products`
-- [ ] Tool `create_product`
-- [ ] Tool `list_orders` (with `date: today` resolved in **store timezone**)
-- [ ] Tool `get_order`
-- [ ] Tool `update_order_status`
-- [ ] Tool `get_store_info` (name, currency, timezone)
-- [ ] Trimmed output DTOs + `structuredContent` + `outputSchema`
-- [ ] Bearer-token check on `/mcp` (`WOO_MCP_TOKEN` from Secret)
-- [ ] `/healthz` + `/readyz` endpoints
-- [ ] Dockerfile (non-root, multi-stage)
-- [ ] Added to `charts/store-woocommerce`: Deployment, ClusterIP Service, **NetworkPolicy (ingress only from platform-api)**, Secret mount
-- [ ] Verified with MCP Inspector via `kubectl port-forward` (all 6 tools)
-- [ ] Verified **not reachable** from outside the cluster and from other namespaces (curl test documented)
-- [ ] README section: "How woo-mcp talks to the store and why (REST vs WP-CLI vs SQL)"
+Live proof for the items below: woo-mcp run on the host (`node dist/server.js`) against the real default store through `kubectl -n store-default port-forward svc/store-default-wordpress 8091:80`, with credentials from Secret `store-default-credentials`, called with `npx @modelcontextprotocol/inspector@2.8.0 --cli` (2026-10-09). Unit tests: `npm --prefix mcp-servers/woo-mcp test` (21 tests) and `run check`.
+
+- [x] Scaffold `mcp-servers/woo-mcp` (TS, `@modelcontextprotocol/sdk@1.32.1`, zod 3, Fastify, Streamable HTTP, stateless, JSON responses). Proof: `run check` ✓; `app.test.ts` "serves MCP statelessly" (no `initialize`, no `Mcp-Session-Id`)
+- [x] OAuth 1.0a (HMAC-SHA256) signer for WC REST over HTTP + unit test with known vectors. Proof: `oauth1.test.ts`; vectors computed with WooCommerce 11.2's own PHP functions in the store pod; live signed calls accepted (incl. a search with spaces). Signs against the **home URL** (SYSTEM.md L18)
+- [x] Tool `list_products`. Proof: live `search="Ceramic Mug"` → product 12
+- [x] Tool `create_product`. Proof: live → draft product 15 "woo-mcp live test" (left as a draft, not on the storefront); bad price → validation `isError`
+- [x] Tool `list_orders` (with `date: today` resolved in **store timezone**). Proof: live `date=today` → order 14 (COD, 199 INR), `date=2026-10-08` → none; `dates.test.ts` (UTC 20:00 = next day in Asia/Kolkata)
+- [x] Tool `get_order`. Proof: live order 14; unknown id 99999 → `isError` "WooCommerce at … returned 404 woocommerce_rest_shop_order_invalid_id: Invalid ID."
+- [x] Tool `update_order_status`. Proof: live order 14 → `processing` (unchanged status, so no data change); note path covered by `tools.test.ts`
+- [x] Tool `get_store_info` (name, currency, timezone). Proof: live → "Urumi Demo Store", INR, Asia/Kolkata, today 2026-10-09
+- [x] Trimmed output DTOs + `structuredContent` + `outputSchema`. Proof: `tools.test.ts` (all tools have `outputSchema` + annotations; raw `meta_data` dropped); SDK validates `structuredContent` against `outputSchema` on every live call
+- [x] Bearer-token check on `/mcp` (`WOO_MCP_TOKEN` from Secret). Proof: `app.test.ts` (missing/wrong → 401 + `WWW-Authenticate`); live `curl` without token → 401. Token is the chart's existing `mcp-token` key; mounting it is part of the chart item below
+- [x] `/healthz` + `/readyz` endpoints. `/readyz` = WordPress answers within 2 s (any status < 500, SYSTEM.md L11); `/healthz` = process only. Proof: `app.test.ts` "probes" (store down → healthz 200, readyz 503 with the reason); in-cluster pod Ready
+- [x] Dockerfile (non-root, multi-stage). Proof: `minikube image build -t store-platform/woo-mcp:dev mcp-servers/woo-mcp`; runs as uid 10001 with `readOnlyRootFilesystem`; `ops/up.ps1` builds it and restarts the Deployment (L12)
+- [x] Added to `charts/store-woocommerce`: Deployment, ClusterIP Service, **NetworkPolicy (ingress only from platform-api)**, Secret mount (`templates/woo-mcp.yaml`, `wooMcp.*` values). Proof: `helm lint` + `helm template` local and prod; `helm upgrade store-default` (rev 3) → woo-mcp 1/1 Ready, 0 restarts
+- [x] Verified with MCP Inspector via `kubectl port-forward` (all 6 tools). Proof (2026-10-10): `port-forward svc/store-default-woo-mcp 3001:80` + Inspector 2.8.0 CLI → tools/list = 6; get_store_info, list_products, list_orders today, get_order 14, update_order_status (same status), create_product (draft 16) all OK; no token → 401
+- [x] Verified **not reachable** from outside the cluster and from other namespaces. Proof: `bash scripts/verify-store-isolation.sh` → 12/12 PASS (woo-mcp blocked from another namespace, from its own namespace and from non-API pods in `platform`; open from the real platform-api pod; Service is ClusterIP; no Ingress backend names it)
+- [x] README section: "How woo-mcp talks to the store and why (REST vs WP-CLI vs SQL)". README §6.1
 
 ## P3 — Gateway core (DESIGN §6, §7.3)
-- [ ] DB migrations: `mcp_servers`, `mcp_tools`, `api_keys`, `audit_log`, `tool_policies`, `invites`, `users.role`
-- [ ] `crypto.ts`: AES-256-GCM seal/open; key from Secret `gateway-enc-key`
-- [ ] `ssrf.ts`: URL + resolved-IP validation, connect-time re-check, no redirects (unit-tested)
-- [ ] `registry.ts`: CRUD; credential write-only; slug rules
-- [ ] REST: `GET/POST/PATCH/DELETE /api/servers`, `POST /api/servers/:id/test` (admin only)
-- [ ] `upstreams.ts`: client pool, credential injection, per-call timeout, bulkhead, error classification
-- [ ] `health.ts`: periodic probe, **exponential backoff + jitter**, catalog refresh, status Connected/Unreachable/Disabled with human-readable `last_error`
-- [ ] `catalog.ts`: prefixed (`slug__tool`), filtered, sorted, 64-char-safe names
-- [ ] `policy.ts`: role × tool_policies
-- [ ] `audit.ts`: append-only writes on **every** call outcome
-- [ ] `mcpEndpoint.ts`: `POST /mcp`, stateless SDK server, API-key auth, Origin check, 401 + `WWW-Authenticate`
-- [ ] Seed default upstreams from `GATEWAY_SEED_SERVERS` (idempotent upsert, `managed_by=helm`)
-- [ ] Integration test: 3 fake upstreams (ok / slow / dead) → list works, calls route, timeout message clear, audit rows present
-- [ ] Ingress for `/mcp` with buffering off + long read timeout
+SQLite suites run in Node 20 with `bash scripts/test-backend.sh` (43 tests); on the Windows host they skip (SYSTEM.md L13) and the rest pass with `npm --prefix backend-node test` (35 passed, 8 skipped).
+
+- [x] DB migrations: `mcp_servers`, `mcp_tools`, `api_keys`, `audit_log`, `tool_policies`, `invites`, `users.role` (+ `users.disabled_at`), additive in `db.ts` `migrateGateway`. Proof: `gateway-db.test.ts` (old DB upgraded with rows kept, idempotent, CHECKs enforced); live: API image rebuilt + `helm upgrade platform` → in-pod query shows 6/6 tables and `role,disabled_at` columns, `/healthz` 200. `users.role` is not read yet (P5)
+- [x] `crypto.ts`: AES-256-GCM seal/open; key from Secret `gateway-enc-key` (chart-generated with `lookup` + `keep` locally, `existingSecret` in prod). Server id is the AAD, so a sealed credential can't be moved to another row. Proof: `gateway-crypto.test.ts`; pod env `GATEWAY_ENC_KEY` = 32 bytes
+- [x] `ssrf.ts`: URL + resolved-IP validation, connect-time re-check, no redirects (unit-tested). Proof: `gateway-ssrf.test.ts` (23 tests, incl. a real server on loopback that a rebound name never reaches). Not wired into upstream calls yet: that is `upstreams.ts`
+- [x] `registry.ts`: CRUD; credential write-only; slug rules. Proof: `gateway-db.test.ts` "gateway registry" (sealed in DB, absent from public view, SSRF on create/update, immutable slug, no `__`, Helm-managed rows can't be deleted)
+Live proof for the items below (2026-10-10): API image rebuilt, `helm upgrade platform`; test user `tester-b@example.com` (signup via API, key minted with `dist/gateway/keys.js` in the pod until the P5 key routes exist); Inspector 2.8.0 CLI against `http://api.127.0.0.1.nip.io:8088/mcp`. Integration suite: `gateway-core.test.ts` (14 tests) in `bash scripts/test-backend.sh` → 57/57.
+
+- [x] REST: `GET/POST/PATCH/DELETE /api/servers`, `POST /api/servers/:id/test` (admin only; [gateway/routes.ts](backend-node/src/gateway/routes.ts)). Proof (live): member GET → names/status/tool names only (no URL, no auth fields); member POST → 403 "only admins can manage MCP servers"; no session → 401. Admin write paths covered by registry tests; admin = `ADMIN_EMAILS` or `X-API-Key` until P5
+- [x] `upstreams.ts`: client pool, credential injection, per-call timeout, bulkhead, error classification. Proof: `gateway-core.test.ts` (upstream sees `Bearer ok-upstream-token`; timeout → "Upstream 'slow' timed out after 1000 ms"; dead → "is unreachable: ECONNREFUSED"); uses the SSRF-guarded fetch in production (`server.ts`)
+- [x] `health.ts`: periodic probe, **exponential backoff + jitter**, catalog refresh, status Connected/Unreachable/Disabled with human-readable `last_error`. Proof (live): `kubectl scale store-default-woo-mcp --replicas=0` → `Unreachable`, `last_error` "Upstream 'woo' is unreachable: ECONNREFUSED"; scaled back → `Connected` after 3 failed probes (15 s → 30 s → 60 s), failures reset to 0. Test "backoff doubles per failure up to the cap"
+- [x] `catalog.ts`: prefixed (`slug__tool`), filtered, sorted, 64-char-safe names. Proof: test "tools/list: prefixed, sorted, sanitized…" (zero-width char stripped, `[Server]` label); live: the 6 tools disappear 60 s (grace) after woo-mcp is killed
+- [x] `policy.ts`: role × tool_policies. Proof: test "…a policy-denied tool looks the same but is audited as denied" (hidden for member, visible for admin)
+- [x] `audit.ts`: append-only writes on **every** call outcome. Proof: test "every call above wrote exactly one audit row" (ok, timeout, tool_error, bad_request, not_found, denied, unreachable); live: 5 calls → 5 rows under `tester-b@example.com`, source `mcp`
+- [x] `mcpEndpoint.ts`: `POST /mcp`, stateless SDK server, API-key auth, Origin check, 401 + `WWW-Authenticate`. Proof (live): no key → 401; key → tools/list = 6 `woo__*`; `woo__get_store_info` and `woo__list_orders date=2026-10-09` (order 14) OK; `order_id:"abc"` → "Gateway: invalid arguments: data/order_id must be integer"; `nope__x` → JSON-RPC -32602 "Unknown tool". Tests: foreign Origin → 403; revoked key → 401 on the next request
+- [x] Seed default upstreams from `GATEWAY_SEED_SERVERS` (idempotent upsert, `managed_by=helm`). Credential referenced by Secret `store-default/store-default-credentials:mcp-token`, read through the K8s API (DESIGN §10.1). Proof (live): log `{"slug":"woo","result":"created"}`, status Connected, 6 tools cached
+- [x] Integration test: 3 fake upstreams (ok / slow / dead) → list works, calls route, timeout message clear, audit rows present. Proof: `backend-node/test/gateway-core.test.ts` (14 tests, real HTTP MCP servers, SSRF guard on)
+- [x] Ingress for `/mcp` with buffering off + long read timeout (`templates/api-mcp-ingress.yaml`, annotations in `gateway.mcpIngress`). Proof: `helm lint`/`template` local + prod; live calls above went through ingress-nginx at `api.127.0.0.1.nip.io:8088/mcp`
 
 ## P4 — Two more upstream servers (DESIGN §4.1)
-- [ ] `notes-mcp` (ours): `add_note`, `list_notes`, `search_notes`; SQLite on PVC; requires bearer token
-- [ ] `everything-mcp`: official reference server in Streamable HTTP mode, pinned version
-- [ ] `charts/mcp-upstreams` with probes, resources, NetworkPolicies
-- [ ] Cross-server prompt designed and verified, e.g. *"List today's orders and save a follow-up note for each customer"* (woo + notes)
-- [ ] Collision demo: two servers exposing the same tool name (e.g. two stores' `list_orders`) are both visible and route correctly
+- [x] `notes-mcp` (ours): `add_note`, `list_notes`, `search_notes`; SQLite on PVC; requires bearer token (`mcp-servers/notes-mcp`, Node 22 built-in `node:sqlite`). Proof: `npm --prefix mcp-servers/notes-mcp test` (6 tests: 401 without token, tools + outputSchema, tag filter, literal `%`/`_` search, probes); live via gateway (below)
+- [x] `everything-mcp`: official reference server in Streamable HTTP mode, pinned version (`@modelcontextprotocol/server-everything@2026.8.31` with lockfile, `mcp-servers/everything-mcp`). Proof: seeded → Connected, 13 tools; `everything__echo` via gateway → "Echo: hello from the gateway"
+- [x] `charts/mcp-upstreams` with probes, resources, NetworkPolicies (release `upstreams`, ns `mcp-servers`; `ops/up.ps1` installs it after the store). Proof: `helm lint` + `template` local and prod; both pods 1/1, 0 restarts, PVC Bound; `verify-store-isolation.sh` 5 new checks PASS (blocked from another ns, from a neighbour in `mcp-servers`, from non-API pods in `platform`; open from platform-api)
+- [x] Cross-server prompt designed and verified, e.g. *"List today's orders and save a follow-up note for each customer"* (woo + notes). Proof (live, chat agent, 2026-10-10): the prompt → `woo__list_orders {"date":"today"}` → `notes__add_note` "Follow-up for order #17" tags `follow-up,order-17`, 2 rounds, 2.9 s; both audited under `admin-a`, source `chat`. Same chain earlier through `/mcp` with a member key
+- [x] Collision demo: two servers exposing the same tool name (e.g. two stores' `list_orders`) are both visible and route correctly. Proof (live): admin registered the same store again as `shop2` → member's tools/list shows `shop2__list_orders` and `woo__list_orders`; both calls OK; audit rows carry `server_slug` `shop2` and `woo` respectively; demo entry deleted afterwards. Unit: `gateway-core.test.ts` `ok__echo` / `slow__echo`
 
 ## P5 — Team and access (DESIGN §8.1–8.2)
 - [x] Email/password signup + login with scrypt hashing and session tokens (`auth.ts`)
-- [~] Roles: `admin` / `member` exist only as derived from `ADMIN_EMAILS`. Need a persistent `users.role` column
-- [ ] First user becomes admin; open signup disabled afterwards (`auth.openSignup` value)
-- [ ] Invites: admin creates invite (email, role) → link → accept + set password
-- [ ] Admin can change roles / disable users
-- [ ] API keys: create (shown once), list, revoke; stored as SHA-256; `last_used_at`
-- [ ] Revoked key rejected on the **next** request (test)
-- [ ] Audit log API with filters; members see own rows, admins see all
-- [~] Rate limits exist per IP (`ratelimit.ts`). Add per-API-key limit on `/mcp`
+P5 proof (2026-10-10): `team.test.ts` (11 tests) in `bash scripts/test-backend.sh` → 68/68; live on the cluster DB (which had one member and no admin) with `curl` against `api.127.0.0.1.nip.io:8088`. Owner approved implementing DESIGN §8.1 as written (Rule 8).
+
+- [x] Roles: persistent `users.role` is the source of truth (`team/members.ts`); `ADMIN_EMAILS` still promotes and now stores it; gateway reads the role per request. Proof: test "ADMIN_EMAILS promotes and stores the role"; live members list `admin-a:admin`, `tester-b:member`
+- [x] First user becomes admin; open signup disabled afterwards (`AUTH_OPEN_SIGNUP` env, default `"false"`). Rule is "no active admin yet → next signup is admin", which also fixes installs upgraded from the ADMIN_EMAILS era. Proof (live): `admin-a` signup → `role=admin`; next signup → 403 `signup_closed`
+- [x] Invites: admin creates invite (email, role) → link → accept + set password (`team/invites.ts`; token SHA-256, 7 days, single use). Proof (live): invite `member-c` → link → accepted as member; tests: reuse → 400, member can't invite → 403, existing email → 409
+- [x] Admin can change roles / disable users (`GET/PATCH /api/members`). Last active admin can't be demoted or disabled (409). Disabling deletes sessions, blocks login and kills API keys. Proof: tests "refuses to demote or disable the last active admin", "disabling a member logs them out…"; live member → `/api/members` 403
+- [x] API keys: create (shown once), list, revoke; stored as SHA-256; `last_used_at` (`GET/POST/DELETE /api/keys`, `?all=1` for admins). Proof: test "API keys: shown once, listed without secret, revoked by owner, invisible to other members", "an admin can revoke anyone's key"; live B created key `eba8b338`
+- [x] Revoked key rejected on the **next** request (test). Proof (live): B's key HTTP 200 → `DELETE /api/keys/:id` → next `/mcp` call HTTP 401 "missing, invalid or revoked API key"; tests in `team.test.ts` and `gateway-core.test.ts`
+- [x] Audit log API with filters; members see own rows, admins see all (`GET /api/audit?user=&server=&tool=&outcome=&source=&from=&to=&limit=&before_id=`). Proof: test "audit API: members see only their own rows even if they ask for others…" (args redacted, paging by `before_id`, bad filter → 400); live `?source=chat&limit=3` → newest 3 chat rows + `next_before_id`, no session → 401
+- [x] Per-API-key limit on `/mcp` (token bucket per key, after auth: burst `MCP_KEY_RATE_LIMIT_CAPACITY`=120, refill 2/s; 429 + `Retry-After`). Per-IP limits (`ratelimit.ts`) stay for everything else. Proof: test "rate-limits per API key: another key is unaffected"
 
 ## P6 — Chat agent (DESIGN §7.4)
-- [~] LLM client exists (`ai.ts`, Groq, fallback). Default model `llama-3.1-70b-versatile` is **decommissioned**; switch to `openai/gpt-oss-120b`
-- [ ] Generic OpenAI-compatible client with `tools` / `tool_calls` support
-- [ ] `LLM_API_KEY` in Secret `llm-credentials`; base URL and model in values
-- [ ] Tool loop (≤ 8 rounds, 120 s budget), calls `GatewayCore.callTool(user, …, source='chat')`
-- [ ] System prompt: current date/time, timezone, untrusted-tool-output rule
-- [ ] SSE stream of tool_call / tool_result / message events
-- [ ] Verified: "create product X for 499" → visible on storefront; audit row under user A
-- [ ] Verified: "what orders came in today?" returns the hand-placed order
+P6 proof (2026-10-10): `chat.test.ts` (9 tests, host) + full suite 79/79 in Node 20; live against Groq `openai/gpt-oss-120b` (checked present in `/models` first, SYSTEM.md G3) as `admin-a` through ingress `api.127.0.0.1.nip.io:8088/api/chat`.
+
+- [x] Default model switched: `ai.ts` and the chat use `LLM_MODEL` (values: `openai/gpt-oss-120b`); `llama-3.1-70b-versatile` removed
+- [x] Generic OpenAI-compatible client with `tools` / `tool_calls` support (`chat/llm.ts`; retries 429/5xx with capped exponential backoff + jitter). Proof: tests "retries 429 with backoff…", "errors name the provider and status but never contain the key"
+- [x] LLM key from a Secret; base URL, model, timeout in values (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_MS`, `CHAT_TIMEZONE`). *Design change:* the key is `LLM_API_KEY` (or the existing `GROQ_API_KEY`) in Secret `platform-api-env`, not a separate `llm-credentials` Secret (DESIGN §7.4 says why). No key → `/api/chat` 503 with the reason
+- [x] Tool loop (≤ 8 rounds, 120 s budget, ≤ 4 parallel), calls `GatewayCore.callTool(user, …, source='chat')` (`chat/agent.ts`). Proof: tests "calls the tool as the logged-in user with source=chat…", "stops after 8 tool rounds…", "runs at most 4 tool calls at once", bad JSON / unknown tool → error fed back to the model
+- [x] System prompt: current date/time, timezone, untrusted-tool-output rule; browser can't send system/tool messages. Proof: tests "system prompt carries date/time in the store timezone…", "drops system/tool messages sent by the browser"
+- [x] SSE stream of tool_call / tool_result / message events (`POST /api/chat`, `text/event-stream`; `/api/chat` added to the no-buffering Ingress). Proof (live): HTTP 200 `text/event-stream`, events `tool_call → tool_result → message → done`
+- [x] Verified: "create product X for 499" → visible on storefront; audit row under user A. Proof (live): "Create a product called Linen Shirt priced 499 rupees." → `woo__create_product` → product 18; public Store API search returns `18 Linen Shirt 499 INR`, product page HTTP 200; audit `admin-a@example.com chat woo__create_product ok`
+- [x] Verified: "what orders came in today?" returns the hand-placed order. Proof (live): `woo__list_orders {"date":"today"}` → order 17 (COD, 199 INR, 2026-10-10 Asia/Kolkata), answer names it
 
 ## P7 — Dashboard (DESIGN §7.6)
-- [x] React + Vite dashboard with login/signup and session restore
-- [~] Store list/status UI exists (reuse for bonus Stores page)
-- [ ] Navigation shell: Servers · Chat · API keys · Audit · Members · Stores · Connect
-- [ ] Servers page: status pills, last error, latency, tools list, add/edit/disable/delete, test connection
-- [ ] Members page: invite, role change, disable
-- [ ] API keys page: create (copy-once modal + ready `claude mcp add` command), revoke
-- [ ] Audit page: filterable table, auto-refresh
-- [ ] Chat page: messages + tool-call cards
-- [ ] Connect page: gateway URL and snippets for Claude Code / Cursor / Inspector
+P7 status (2026-10-10): every page is built (`dashboard/src/pages/*`, DESIGN §7.6 "As built"); `npm --prefix dashboard run build` + `lint` pass. Each page's API calls were run live through the in-cluster dashboard (proof per item). Still `[~]` because nobody has clicked through the pages in a browser yet: do that once (both roles) and flip them to `[x]`.
+
+- [x] React + Vite dashboard with login/signup and session restore; now also invite acceptance (`?invite=<token>` → name + password)
+- [~] Stores page: the existing store UI moved unchanged into `pages/Stores.tsx` behind the nav. Browser check pending
+- [~] Navigation shell: Servers · Chat · API keys · Audit · Members (admin only) · Stores · Connect; hash routing (`#/audit`); any 401 returns to login. Browser check pending
+- [~] Servers page: status pills, last error + failed probes, latency, last check/OK, tools list (expand), add/edit/disable/delete, test connection; members get names + tools only. API proof (2026-10-10, in-cluster dashboard at `dashboard.127.0.0.1.nip.io`, every call through its nginx `/api` proxy with admin `admin-a` and member `tester-b` sessions): admin list has URLs + 22 tools, member list keys are only `id,slug,name,enabled,status,tools`; test `woo` → ok; delete Helm-managed `woo` → 403 "disable it instead"; disable `notes` → a key's tools/list 22 → 19, re-enable + test → 22
+- [~] Members page: invite (link shown once), pending invites + revoke, role change, disable/enable. API proof (2026-10-10, in-cluster dashboard at `dashboard.127.0.0.1.nip.io`, every call through its nginx `/api` proxy with admin `admin-a` and member `tester-b` sessions): invite link `http://dashboard.127.0.0.1.nip.io:8088/?invite=…` → accepted as member, reuse → 400; disable → login 401; demote last admin → 409 message shown; member → 403
+- [~] API keys page: create (copy-once modal + ready `claude mcp add` command), list (admins: everyone's), revoke. API proof (2026-10-10, in-cluster dashboard at `dashboard.127.0.0.1.nip.io`, every call through its nginx `/api` proxy with admin `admin-a` and member `tester-b` sessions): member key created, absent from the list response, 22 tools via `/mcp`, admin revokes it → next `/mcp` call 401
+- [~] Audit page: filters (user for admins, server, tool, outcome, source, from/to), 5 s auto-refresh, "Load older" by `before_id`, row details (error, redacted args). API proof (2026-10-10, in-cluster dashboard at `dashboard.127.0.0.1.nip.io`, every call through its nginx `/api` proxy with admin `admin-a` and member `tester-b` sessions): member asking for `user=admin-a` still gets only own rows; admin `server=woo&source=mcp` + `next_before_id` paging
+- [~] Chat page: messages + collapsible tool-call cards, Stop button, history kept while switching pages. API proof (2026-10-10, in-cluster dashboard at `dashboard.127.0.0.1.nip.io`, every call through its nginx `/api` proxy with admin `admin-a` and member `tester-b` sessions): "What orders came in today?" streamed through both nginx proxies as separate SSE events `tool_call → tool_result (167 ms) → message → done`
+- [~] Connect page: gateway URL from `GET /config` (`GATEWAY_PUBLIC_URL`) + Claude Code / Cursor / Inspector / curl snippets. Proof: `/api/config` → `{"gateway":{"url":"http://api.127.0.0.1.nip.io:8088/mcp"}}`
 - [x] Hide legacy SaaS panels behind the feature flag (done in P0)
 
 ## P8 — Helm and Kubernetes completeness (DESIGN §10)
@@ -136,8 +148,8 @@ Last reviewed: 2026-10-09
 - [x] platform-api: readiness + liveness probes, requests/limits, non-root, seccomp, dropped caps
 - [x] Platform API persistence via PVC
 - [x] Scoped RBAC ClusterRole for the reconciler (no wildcards)
-- [~] Dashboard Deployment exists but has no liveness probe, `resources: {}`, and runs nginx as root. Also, **the templates ignore `dashboard.enabled`**: with `enabled: false` the pod is still created and sits in `ImagePullBackOff` (image `store-platform/dashboard:dev` is never built). Fix all of these, and have `up.ps1` build the dashboard image
-- [ ] Dashboard served in-cluster behind Ingress at `dashboard.<domain>`; API under `/api`, gateway under `/mcp` (same origin → no CORS)
+- [x] Dashboard Deployment fixed: `nginx-unprivileged` (uid 101, port 8080), readiness + liveness on `/healthz`, requests 20m/32Mi + limit 128Mi, read-only root FS, no SA token; all dashboard templates honour `dashboard.enabled`; `up.ps1` builds the image and restarts API + dashboard after a rebuild (L12). Proof: `helm lint` + `template` local and prod; `--set dashboard.enabled=false` renders no dashboard objects; live `ops/up.ps1` → pod 1/1, `id` = uid 101, `touch /etc/x` → read-only, no `/var/run/secrets/kubernetes.io`
+- [x] Dashboard served in-cluster behind Ingress at `dashboard.<domain>`, with `/api` proxied to platform-api by the dashboard's nginx (same origin, no CORS). *Design change:* the gateway stays at `api.<domain>/mcp` (DESIGN §10.2.1 says why). Proof: `http://dashboard.127.0.0.1.nip.io:8088/` 200, deep link 200 (SPA fallback), `/api/config` 200, chat SSE streamed through it
 - [ ] Every workload has readiness + liveness + requests/limits (checklist table in DESIGN §10.2)
 - [ ] All credentials in Secrets; `existingSecret` support for prod; chart-generated with `lookup` for local
 - [~] NetworkPolicies: store-default has ingress policies for mariadb and wordpress (proven by `scripts/verify-store-isolation.sh`). Still to do: default-deny in `platform`, `mcp-servers`, `store-default` incl. egress
@@ -159,14 +171,14 @@ Last reviewed: 2026-10-09
 
 ### Definition-of-done tracker (must all be `[x]` before recording)
 - [ ] Storefront checkout with COD; order visible in WC admin
-- [ ] User A (chat): create product → visible on storefront
-- [ ] User A (chat): "orders today" returns the hand-placed order
+- [x] User A (chat): create product → visible on storefront (2026-10-10: Linen Shirt, product 18, Store API + product page)
+- [x] User A (chat): "orders today" returns the hand-placed order (order 17). Note: order placed by `verify-store.sh`; repeat with a browser order before recording (`scripts/order-checklist.md`)
 - [ ] User B (Claude Code/Cursor/Inspector): sees tools of every enabled server using only URL + key
 - [ ] User B: same orders question works
 - [ ] User B: one prompt that uses tools from two different upstreams
-- [ ] Revoke B's key → next call rejected
-- [ ] Disable an upstream → its tools disappear from chat and the external client
-- [ ] Kill an upstream pod → others keep working; dashboard shows it Unreachable
+- [x] Revoke B's key → next call rejected (2026-10-10: HTTP 200 → revoke → HTTP 401 on the next `/mcp` call)
+- [~] Disable an upstream → its tools disappear from chat and the external client (external client verified: `notes` disabled → 0 `notes__*` tools in B's tools/list. Chat builds its tool list from the same `GatewayCore.listTools`, so it follows by construction; still to show live in the dashboard chat, P7)
+- [~] Kill an upstream pod → others keep working; dashboard shows it Unreachable (API side verified in P3: `Unreachable` + reason, others unaffected; dashboard is P7)
 - [ ] Every call above appears in the audit log under the right user
 
 ## B — Bonus: multi-store provisioning (DESIGN §11)
@@ -200,19 +212,19 @@ Last reviewed: 2026-10-09
 ### S5 Hosted MCP servers
 - [ ] Add server by container image → Deployment + Secret + limits + NetworkPolicy in `mcp-hosted`, clean removal
 ### S6 Security hardening
-- [ ] SSRF guard (P3)
-- [ ] Upstream credentials encrypted at rest (P3)
+- [x] SSRF guard (P3): `gateway/ssrf.ts`; enforced on registry writes and on every upstream connection (`createGuardedFetch` in `server.ts`). Proof: `gateway-ssrf.test.ts`, live seeded `woo` upstream passes (allowlisted in-cluster name)
+- [x] Upstream credentials encrypted at rest (P3): `gateway/crypto.ts` + registry seal on write; REST responses carry only `has_credential`. Proof: `gateway-db.test.ts`
 - [ ] Default-deny NetworkPolicies everywhere (P8)
-- [~] Non-root: API yes; store pods yes (WordPress 33, MariaDB 999, WP-CLI 33; only the CHOWN init container runs as root); dashboard nginx no
+- [x] Non-root: API yes; store pods yes (WordPress 33, MariaDB 999, WP-CLI 33; only the CHOWN init container runs as root); dashboard nginx yes (uid 101, P8)
 - [ ] Tool-definition pinning / rug-pull detection
 - [ ] Narrow `store-installer` role instead of binding `admin` in store namespaces
 ### S7 Scaling
 - [ ] Gateway stateless (P3) → 2 replicas once DB is Postgres
-- [~] Rate limits per IP exist; per-key limit (P5)
+- [x] Rate limits per IP exist; per-key limit on `/mcp` (P5)
 ### S8 Observability
 - [~] `/metrics` exists for provisioning events
 - [ ] `mcp_tool_calls_total{server,tool,outcome}`, `mcp_tool_call_duration_seconds`, `mcp_upstream_up{server}`
-- [ ] Clear reason for unreachable/failed calls in UI (P3)
+- [~] Clear reason for unreachable/failed calls in UI (P3): API side done (`last_error`, tool error texts name the upstream and reason); dashboard Servers page is P7
 ### S9 Upgrades and rollback
 - [~] `POST /stores/:id/upgrade` exists for stores
 - [ ] Runbook: `helm upgrade --atomic`, `helm history`, `helm rollback` for all three charts, shown in the demo

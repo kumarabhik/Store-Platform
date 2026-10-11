@@ -1,0 +1,34 @@
+{{- if .Values.gateway.mcpIngress.enabled }}
+# Separate Ingress for the streaming paths (/mcp and the chat SSE stream /api/chat), so their
+# no-buffering, long-timeout annotations don't change the rest of the API. Same host as the API
+# Ingress; the more specific path wins.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "platform.apiName" . }}-mcp
+  {{- with .Values.gateway.mcpIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.global.ingressClassName | quote }}
+  {{- if .Values.global.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ printf "api.%s" .Values.global.baseDomain | quote }}
+      secretName: {{ .Values.global.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ printf "api.%s" .Values.global.baseDomain | quote }}
+      http:
+        paths:
+          {{- range list "/mcp" "/api/chat" }}
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "platform.apiName" $ }}
+                port:
+                  number: 80
+          {{- end }}
+{{- end }}

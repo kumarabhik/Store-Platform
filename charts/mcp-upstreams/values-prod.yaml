@@ -1,0 +1,6 @@
+# k3s VPS. Create before installing (key: notes-mcp-token). Same name the chart generates locally
+# (<release>-credentials), so the gateway's GATEWAY_SEED_SERVERS reference works in both environments.
+#   kubectl -n mcp-servers create secret generic upstreams-credentials --from-literal=notes-mcp-token=$(openssl rand -hex 24)
+existingSecret: upstreams-credentials
+
+storageClassName: local-path

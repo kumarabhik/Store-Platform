@@ -1,0 +1,68 @@
+{{- if .Values.everything.enabled }}
+# The official MCP reference server: proves interop with a server we didn't write.
+apiVersion: v1
+kind: Service
+metadata:
+  name: everything-mcp
+  labels:
+    {{- include "upstreams.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "upstreams.selectorLabels" (dict "ctx" . "component" "everything-mcp") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: everything-mcp
+  labels:
+    {{- include "upstreams.labels" . | nindent 4 }}
+    app.kubernetes.io/component: everything-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "upstreams.selectorLabels" (dict "ctx" . "component" "everything-mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "upstreams.selectorLabels" (dict "ctx" . "component" "everything-mcp") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      # Its get-env tool prints the process environment. Without service links that is a handful
+      # of harmless variables, not the IP and port of every Service in the namespace.
+      enableServiceLinks: false
+      securityContext:
+        {{- include "upstreams.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: everything-mcp
+          image: {{ .Values.everything.image }}
+          imagePullPolicy: {{ .Values.everything.pullPolicy }}
+          securityContext:
+            {{- include "upstreams.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3001
+          env:
+            - name: PORT
+              value: "3001"
+          # It has no health endpoint, so probes check that the port accepts connections (DESIGN §10.2).
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.everything.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+{{- end }}

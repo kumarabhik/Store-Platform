@@ -32,6 +32,12 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
             {{- end }}
+            # Encrypts upstream MCP credentials at rest (gateway/crypto.ts).
+            - name: GATEWAY_ENC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "platform.gatewayEncKeySecret" . }}
+                  key: key
           # Credentials (Stripe, LLM, admin API key) come only from this Secret, never from values.
           # An explicit env entry would override it, so secret keys must not appear in api.env.
           envFrom:

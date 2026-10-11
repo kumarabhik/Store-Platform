@@ -1,0 +1,25 @@
+{
+  "name": "notes-mcp",
+  "private": true,
+  "description": "Team notes MCP server (Streamable HTTP, stateless, SQLite) used as the gateway's second upstream",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "fastify": "^4.28.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.7"
+  }
+}

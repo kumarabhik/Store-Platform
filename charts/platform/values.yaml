@@ -5,6 +5,20 @@ global:
     enabled: false
     secretName: "tls-secret"
 
+gateway:
+  encKey:
+    # Name of an existing Secret with key "key" (32 random bytes, base64). Empty: the chart
+    # generates Secret gateway-enc-key once and keeps it (local only; see values-prod.yaml).
+    existingSecret: ""
+  # Ingress for /mcp on the API host. MCP calls can be long and may stream, so nginx must not
+  # buffer them or cut them at its 60 s default (SYSTEM.md G5). Traefik needs none of this.
+  mcpIngress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-buffering: "off"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
 api:
   image: "store-platform/api-node:dev"
   replicas: 1
@@ -19,7 +33,9 @@ api:
     INGRESS_CLASS_NAME: "nginx"
     STORE_CHART_REF: "bitnami/wordpress"
     BACKUP_DIR: "/data/backups"
-    DASHBOARD_PUBLIC_URL: "http://127.0.0.1:5173"
+    DASHBOARD_PUBLIC_URL: "http://dashboard.127.0.0.1.nip.io"
+    # Shown on the dashboard's Connect page; external MCP clients use this URL.
+    GATEWAY_PUBLIC_URL: "http://api.127.0.0.1.nip.io/mcp"
     ADMIN_EMAILS: ""
     # Pre-MCP SaaS features (billing, custom domains, backups, Medusa). Off for the gateway build.
     FEATURE_LEGACY_SAAS: "false"
@@ -36,13 +52,44 @@ api:
     CREATE_RATE_LIMIT_REFILL_PER_SEC: "0.1"
     CREATE_RATE_LIMIT_TTL_SEC: "900"
     CORS_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173,http://dashboard.127.0.0.1.nip.io"
+    # Chat agent LLM (any OpenAI-compatible API). The key is LLM_API_KEY (or GROQ_API_KEY) in
+    # Secret platform-api-env, never here. Model names expire: check before a demo (SYSTEM.md G3).
+    LLM_BASE_URL: "https://api.groq.com/openai/v1"
+    LLM_MODEL: "openai/gpt-oss-120b"
+    LLM_TIMEOUT_MS: "60000"
+    # "Today" for the chat agent; same timezone as the store (store chart site.timezone).
+    CHAT_TIMEZONE: "Asia/Kolkata"
+    # Per-API-key limit on /mcp: burst of 120 calls, then 2 per second.
+    MCP_KEY_RATE_LIMIT_CAPACITY: "120"
+    MCP_KEY_RATE_LIMIT_REFILL_PER_SEC: "2"
+    # Signup after the first admin exists: "false" = invite-only (DESIGN §8.1), "true" = anyone can join as member.
+    AUTH_OPEN_SIGNUP: "false"
+    # Browser origins allowed to call /mcp (DNS-rebinding defence). CLI clients send no Origin.
+    GATEWAY_ALLOWED_ORIGINS: ""
+    # Upstreams registered at startup (managed_by=helm). Credentials are referenced by Secret
+    # name/key in the upstream's own namespace and read through the Kubernetes API, never written here.
+    GATEWAY_SEED_SERVERS: '[{"slug":"woo","name":"Default store (WooCommerce)","url":"http://store-default-woo-mcp.store-default.svc.cluster.local/mcp","auth_type":"bearer","credential_secret":{"namespace":"store-default","name":"store-default-credentials","key":"mcp-token"}},{"slug":"notes","name":"Team notes","url":"http://notes-mcp.mcp-servers.svc.cluster.local/mcp","auth_type":"bearer","credential_secret":{"namespace":"mcp-servers","name":"upstreams-credentials","key":"notes-mcp-token"}},{"slug":"everything","name":"MCP reference server","url":"http://everything-mcp.mcp-servers.svc.cluster.local/mcp"}]'
   persistence:
     enabled: true
     size: 1Gi
     storageClassName: ""
 
 dashboard:
+  enabled: true
   image: "store-platform/dashboard:dev"
+  imagePullPolicy: "IfNotPresent"
   replicas: 1
-  resources: {}
+  # nginx serving static files: small and steady. No CPU limit (CFS throttling, DESIGN §10.2).
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  ingress:
+    # nginx-specific: the dashboard's /api/chat answer is an SSE stream of up to 120 s (SYSTEM.md G5).
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-buffering: "off"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
 

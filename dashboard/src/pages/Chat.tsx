@@ -1,0 +1,172 @@
+import { useEffect, useRef, useState } from "react";
+import { errorText, type Api } from "../lib/api";
+
+// Chat page (DESIGN §7.4, §7.6). The agent runs on the server and calls tools through the gateway
+// as the logged-in user; this page only renders its SSE events. History stays in this tab's memory
+// and only user/assistant text is sent back (the API ignores anything else anyway).
+
+type ToolCard = { kind: "tool"; id: string; name: string; args: unknown; result?: { ok: boolean; ms: number; preview: string } };
+type Item = { kind: "user" | "assistant"; text: string } | { kind: "error"; text: string } | ToolCard;
+
+type ChatEvent =
+  | { type: "tool_call"; id: string; name: string; args: unknown }
+  | { type: "tool_result"; id: string; name: string; ok: boolean; ms: number; preview: string }
+  | { type: "message"; text: string }
+  | { type: "error"; message: string }
+  | { type: "done"; rounds: number };
+
+// The server's chat budget is 120 s; give the response a little longer before the browser gives up.
+const CHAT_TIMEOUT_MS = 150_000;
+
+const EXAMPLES = [
+  "What orders came in today?",
+  "Create a product called Linen Shirt priced 499 rupees.",
+  "List today's orders and save a follow-up note for each customer.",
+];
+
+// Minimal SSE reader for a POST response (EventSource can only do GET).
+async function readEvents(res: Response, onEvent: (e: ChatEvent) => void) {
+  const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    let end: number;
+    while ((end = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      const data = block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (data) onEvent(JSON.parse(data) as ChatEvent);
+    }
+  }
+}
+
+export function ChatPage({ api }: { api: Api }) {
+  const [items, setItems] = useState<Item[]>([]);
+  const [input, setInput] = useState("");
+  const [running, setRunning] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [items]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  async function send(text: string) {
+    const question = text.trim();
+    if (!question || running) return;
+    const history = [...items, { kind: "user", text: question } as Item];
+    setItems(history);
+    setInput("");
+    setRunning(true);
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    const messages = history
+      .filter((i): i is { kind: "user" | "assistant"; text: string } => i.kind === "user" || i.kind === "assistant")
+      .map((i) => ({ role: i.kind, content: i.text }))
+      .slice(-40);
+
+    const push = (item: Item) => setItems((current) => [...current, item]);
+    try {
+      const res = await api(
+        "/api/chat",
+        { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream" }, body: JSON.stringify({ messages }), signal: abort.signal },
+        { timeoutMs: CHAT_TIMEOUT_MS },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { message?: string; error?: string } | null;
+        push({ kind: "error", text: body?.message ?? body?.error ?? `Chat failed with HTTP ${res.status}` });
+        return;
+      }
+      await readEvents(res, (e) => {
+        if (e.type === "tool_call") push({ kind: "tool", id: e.id, name: e.name, args: e.args });
+        else if (e.type === "tool_result")
+          setItems((current) => current.map((i) => (i.kind === "tool" && i.id === e.id ? { ...i, result: { ok: e.ok, ms: e.ms, preview: e.preview } } : i)));
+        else if (e.type === "message") push({ kind: "assistant", text: e.text });
+        else if (e.type === "error") push({ kind: "error", text: e.message });
+      });
+    } catch (err) {
+      push({ kind: "error", text: abort.signal.aborted ? "Stopped." : errorText(err, "Chat request failed.") });
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  }
+
+  return (
+    <section className="page chatPage">
+      <header className="pageHeader">
+        <div>
+          <p className="eyebrow">Agent</p>
+          <h2>Chat</h2>
+          <p className="subtle">The agent can use every tool you can see. Each call runs as you and shows up in the audit log.</p>
+        </div>
+        {items.length > 0 && !running && (
+          <button className="btn btnSecondary btnSmall" onClick={() => setItems([])}>
+            New chat
+          </button>
+        )}
+      </header>
+
+      <article className="card chatCard">
+        <div className="chatLog">
+          {items.length === 0 && (
+            <div className="chatEmpty">
+              <p className="subtle">Try one of these:</p>
+              {EXAMPLES.map((q) => (
+                <button key={q} className="btn btnSecondary btnSmall" onClick={() => void send(q)}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
+          {items.map((item, index) =>
+            item.kind === "tool" ? (
+              <details key={`${item.id}-${index}`} className={`toolCard ${item.result ? (item.result.ok ? "toolOk" : "toolFail") : "toolRunning"}`}>
+                <summary>
+                  <span className="mono">{item.name}</span>
+                  <span className="subtle">{item.result ? `${item.result.ok ? "ok" : "error"} · ${item.result.ms} ms` : "running..."}</span>
+                </summary>
+                <p className="mono">args: {JSON.stringify(item.args)}</p>
+                {item.result && <pre className="toolPreview">{item.result.preview}</pre>}
+              </details>
+            ) : (
+              <div key={index} className={`bubble bubble-${item.kind}`}>
+                {item.text}
+              </div>
+            ),
+          )}
+          {running && <div className="subtle thinking">Working...</div>}
+          <div ref={endRef} />
+        </div>
+
+        <form
+          className="chatInput"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void send(input);
+          }}
+        >
+          <input value={input} maxLength={8000} placeholder="Ask about orders, products or notes..." onChange={(e) => setInput(e.target.value)} disabled={running} />
+          {running ? (
+            <button type="button" className="btn btnDanger" onClick={() => abortRef.current?.abort()}>
+              Stop
+            </button>
+          ) : (
+            <button type="submit" className="btn btnPrimary" disabled={!input.trim()}>
+              Send
+            </button>
+          )}
+        </form>
+      </article>
+    </section>
+  );
+}
