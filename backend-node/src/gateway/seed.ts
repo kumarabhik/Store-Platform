@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { HealthChecker } from "./health";
+import { MIN_ROLES, type MinRole } from "./policy";
 import type { Registry } from "./registry";
 
 // Default upstreams declared in Helm values (GATEWAY_SEED_SERVERS, DESIGN §10.1). Upserted on every
@@ -16,6 +17,8 @@ const seedEntry = z.object({
   auth_header_name: z.string().optional(),
   credential_secret: secretRef.optional(),
   timeout_ms: z.number().int().optional(),
+  // Default per-tool rules, e.g. {"create_product":"admin"}, applied when the server is first created.
+  tool_policies: z.record(z.enum(MIN_ROLES as [MinRole, ...MinRole[]])).default({}),
 });
 export type SeedEntry = z.infer<typeof seedEntry>;
 
@@ -52,7 +55,9 @@ export async function seedOne(registry: Registry, entry: SeedEntry, readSecret: 
     await registry.update(existing.id, fields);
     return "updated";
   }
-  await registry.create({ slug: entry.slug, ...fields }, "helm");
+  const created = await registry.create({ slug: entry.slug, ...fields }, "helm");
+  // Only when the server is new: re-applying on every start would undo an admin who reset a tool to default.
+  registry.ensureToolPolicies(created.id, entry.tool_policies);
   return "created";
 }
 

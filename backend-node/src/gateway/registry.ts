@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import type { Db } from "../db";
 import { open, seal } from "./crypto";
+import { MIN_ROLES, type MinRole } from "./policy";
 import { checkUpstreamUrl, type SsrfPolicy } from "./ssrf";
 
 // Registry of upstream MCP servers (DESIGN §5 mcp_servers, §7.3). The credential is write-only:
@@ -19,7 +20,9 @@ export class RegistryError extends Error {
 export const slugSchema = z
   .string()
   .max(24)
-  .regex(/^[a-z][a-z0-9]*(_[a-z0-9]+)*$/, "lowercase letters, digits and single underscores, starting with a letter");
+  .regex(/^[a-z][a-z0-9]*(_[a-z0-9]+)*$/, "lowercase letters, digits and single underscores, starting with a letter")
+  // The gateway's own meta-tools are gateway__search_tools / gateway__call_tool (search mode, S4).
+  .refine((s) => s !== "gateway", "'gateway' is reserved for the gateway's own tools");
 
 const headerName = z.string().regex(/^[A-Za-z0-9-]{1,64}$/, "a plain HTTP header name like X-API-Key");
 const authType = z.enum(["none", "bearer", "header"]);
@@ -169,6 +172,34 @@ export function createRegistry(db: Db, encKey: Buffer, ssrf: SsrfPolicy, lookupA
         id,
       );
       return toPublic(getRow(id)!);
+    },
+
+    // Default per-tool rules declared where the server is registered (Helm seed, provisioner).
+    // Only fills gaps: a rule an admin already set is never overwritten.
+    ensureToolPolicies(id: string, policies: Record<string, MinRole>): void {
+      const insert = db.prepare(`insert or ignore into tool_policies (server_id, tool_name, min_role) values (?, ?, ?)`);
+      for (const [tool, minRole] of Object.entries(policies)) insert.run(id, tool, minRole);
+    },
+
+    // Admin reviewed the changed tool definitions of this server and accepts them (pinning, S6).
+    approveTools(id: string): number {
+      if (!getRow(id)) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
+      return db.prepare(`update mcp_tools set approved_hash = definition_hash where server_id = ? and approved_hash is not definition_hash`).run(id).changes;
+    },
+
+    // Admin choice for one tool ('*' = whole server); null removes it, back to the default rule.
+    setToolPolicy(id: string, toolName: string, minRole: MinRole | null): void {
+      if (!getRow(id)) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
+      if (!/^(\*|[A-Za-z0-9_.:-]{1,128})$/.test(toolName)) throw new RegistryError("invalid", `Gateway registry: '${toolName}' is not a tool name`);
+      if (minRole === null) {
+        db.prepare(`delete from tool_policies where server_id = ? and tool_name = ?`).run(id, toolName);
+        return;
+      }
+      if (!MIN_ROLES.includes(minRole)) throw new RegistryError("invalid", `Gateway registry: min_role must be one of ${MIN_ROLES.join(", ")}`);
+      db.prepare(
+        `insert into tool_policies (server_id, tool_name, min_role) values (?, ?, ?)
+         on conflict (server_id, tool_name) do update set min_role = excluded.min_role`,
+      ).run(id, toolName, minRole);
     },
 
     delete(id: string): void {

@@ -11,7 +11,8 @@ api:
     STORE_PUBLIC_SCHEME: "http"
     STORE_PUBLIC_PORT: "8088"
     INGRESS_CLASS_NAME: "nginx"
-    STORE_CHART_REF: "bitnami/wordpress"
+    STORE_CHART_IMAGE: "store-platform/store-chart:dev"
+    STORE_CHART_ENV: "local"
     BACKUP_DIR: "/data/backups"
     # Invite links point at the in-cluster dashboard (through the 8088 ingress port-forward).
     DASHBOARD_PUBLIC_URL: "http://dashboard.127.0.0.1.nip.io:8088"

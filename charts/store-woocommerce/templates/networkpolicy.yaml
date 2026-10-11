@@ -49,4 +49,95 @@ spec:
       ports:
         - port: 80
           protocol: TCP
+---
+# Default deny for every pod in the release, both directions. The policies above and below are
+# the only allowed paths (DESIGN §8.5). MariaDB gets no egress rule at all: it never calls out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-default-deny
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: store-woocommerce
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-allow-dns
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: store-woocommerce
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# WordPress and the init job talk to this store's database, and to the public internet over
+# HTTP(S): the init job downloads WooCommerce, WordPress checks for updates. Never to private
+# ranges, so a compromised plugin can't scan the cluster.
+{{- range $component := list "wordpress" "init" }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" $ }}-{{ $component }}-egress
+  labels:
+    {{- include "store.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" (dict "ctx" $ "component" "mariadb") | nindent 14 }}
+      ports:
+        - { port: 3306, protocol: TCP }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml $.Values.networkPolicy.privateCidrs | nindent 14 }}
+      ports:
+        - { port: 80, protocol: TCP }
+        - { port: 443, protocol: TCP }
+---
+{{- end }}
+# woo-mcp only ever calls this store's WordPress REST API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-woo-mcp-egress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" . "component" "woo-mcp") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" (dict "ctx" . "component" "wordpress") | nindent 14 }}
+      ports:
+        - { port: 80, protocol: TCP }
 {{- end }}

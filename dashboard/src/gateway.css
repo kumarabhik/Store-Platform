@@ -535,3 +535,41 @@ code,
     max-width: 100%;
   }
 }
+
+.toolRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.policyPick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.policyPick select {
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid rgba(19, 91, 106, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.85);
+  font: inherit;
+}
+
+.pinWarning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 14px;
+}

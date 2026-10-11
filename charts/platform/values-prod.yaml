@@ -1,9 +1,14 @@
 global:
   baseDomain: "your-vps-domain.com"
-  ingressClassName: "nginx"
+  # Traefik is built into k3s; ingress-nginx is end-of-life (SYSTEM.md G6). Same as the store chart.
+  ingressClassName: "traefik"
   tls:
     enabled: true
     secretName: "wildcard-tls-secret"
+
+networkPolicy:
+  # Traefik is built into k3s and runs in kube-system.
+  ingressControllerNamespace: kube-system
 
 gateway:
   encKey:
@@ -18,8 +23,9 @@ api:
   envSecretName: "platform-api-env"
   env:
     BASE_DOMAIN: "your-vps-domain.com"
-    INGRESS_CLASS_NAME: "nginx"
-    STORE_CHART_REF: "bitnami/wordpress"
+    INGRESS_CLASS_NAME: "traefik"
+    STORE_CHART_IMAGE: "ghcr.io/kumarabhik/store-chart:0.1.0"
+    STORE_CHART_ENV: "prod"
     TRUST_PROXY: "true"
     DASHBOARD_PUBLIC_URL: "https://dashboard.your-vps-domain.com"
     GATEWAY_PUBLIC_URL: "https://api.your-vps-domain.com/mcp"

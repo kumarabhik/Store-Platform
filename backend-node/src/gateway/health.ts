@@ -22,8 +22,13 @@ export function nextProbeDelay(failures: number, o: HealthOptions = DEFAULT_HEAL
   return Math.round(base * (1 + (random() * 2 - 1) * o.jitter));
 }
 
-export function definitionHash(tool: { name: string; description?: string; inputSchema: unknown }): string {
-  return crypto.createHash("sha256").update(`${tool.name}|${tool.description ?? ""}|${JSON.stringify(tool.inputSchema)}`).digest("hex");
+// Everything a model or the gateway's policy reads about a tool. Annotations are included: flipping
+// destructiveHint to false would otherwise slip past the admin-only default (S2) unnoticed.
+export function definitionHash(tool: { name: string; description?: string; inputSchema: unknown; annotations?: unknown }): string {
+  return crypto
+    .createHash("sha256")
+    .update(`${tool.name}|${tool.description ?? ""}|${JSON.stringify(tool.inputSchema)}|${JSON.stringify(tool.annotations ?? null)}`)
+    .digest("hex");
 }
 
 export function targetFor(registry: Registry, server: { id: string; slug: string; url: string; updated_at: string }): UpstreamTarget {
@@ -55,15 +60,19 @@ export function createHealthChecker(db: Db, registry: Registry, pool: UpstreamPo
           `update mcp_servers set status = 'Connected', last_error = null, last_ok_at = datetime('now'), last_check_at = datetime('now'),
              last_latency_ms = ?, consecutive_failures = 0 where id = ?`,
         ).run(latency, serverId);
-        // Replace the cached catalog; approved_hash survives so pinning (S6) can compare against it.
+        // Replace the cached catalog. Pinning (S6, DESIGN §8.6): a tool's first definition is
+        // approved on sight (trust on first use); later changes keep the old approved_hash, so the
+        // catalog hides the tool until an admin approves the new definition.
         const upsert = db.prepare(
-          `insert into mcp_tools (server_id, name, description, input_schema, annotations, definition_hash, seen_at)
-           values (?, ?, ?, ?, ?, ?, datetime('now'))
+          `insert into mcp_tools (server_id, name, description, input_schema, annotations, definition_hash, approved_hash, seen_at)
+           values (?, ?, ?, ?, ?, ?, ?, datetime('now'))
            on conflict (server_id, name) do update set description = excluded.description, input_schema = excluded.input_schema,
-             annotations = excluded.annotations, definition_hash = excluded.definition_hash, seen_at = excluded.seen_at`,
+             annotations = excluded.annotations, definition_hash = excluded.definition_hash, seen_at = excluded.seen_at,
+             approved_hash = coalesce(mcp_tools.approved_hash, excluded.definition_hash)`,
         );
         for (const t of tools) {
-          upsert.run(serverId, t.name, t.description ?? null, JSON.stringify(t.inputSchema), t.annotations ? JSON.stringify(t.annotations) : null, definitionHash(t));
+          const hash = definitionHash(t);
+          upsert.run(serverId, t.name, t.description ?? null, JSON.stringify(t.inputSchema), t.annotations ? JSON.stringify(t.annotations) : null, hash, hash);
         }
         const names = tools.map((t) => t.name);
         db.prepare(`delete from mcp_tools where server_id = ? and name not in (select value from json_each(?))`).run(serverId, JSON.stringify(names));

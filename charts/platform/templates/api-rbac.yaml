@@ -49,13 +49,17 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list"]
 
+  # delete: a RoleBinding's roleRef can't change, so moving an old store from "admin" to the
+  # store-installer role means delete + create.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
-    verbs: ["get", "list", "create", "patch", "update"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
 
+  # The API may hand out exactly one role in store namespaces: the narrow store-installer below,
+  # not "admin" (SYSTEM.md L10, ROADMAP S6).
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles"]
-    resourceNames: ["admin"]
+    resourceNames: [{{ include "platform.storeInstallerRole" . | quote }}]
     verbs: ["bind"]
 
 ---
@@ -71,3 +75,30 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "platform.apiName" . }}
     namespace: {{ .Release.Namespace }}
+---
+# What the provisioner's Helm job may do inside one store namespace (bound per namespace with a
+# RoleBinding, never cluster-wide): exactly the kinds charts/store-woocommerce creates, plus
+# watching pods while helm waits. Replaces the built-in "admin" role (ROADMAP S6).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "platform.storeInstallerRole" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

@@ -9,3 +9,7 @@ spec:
     - name: http
       port: 80
       targetPort: 8000
+    # Prometheus metrics; no Ingress routes this port (S8).
+    - name: metrics
+      port: 9464
+      targetPort: metrics

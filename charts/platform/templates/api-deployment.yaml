@@ -1,4 +1,4 @@
-﻿apiVersion: apps/v1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "platform.apiName" . }}
@@ -27,11 +27,20 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+            # Prometheus metrics (METRICS_PORT): in-cluster only, no Ingress route (S8).
+            - name: metrics
+              containerPort: 9464
           env:
             {{- range $name, $value := .Values.api.env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
             {{- end }}
+            # The only role the provisioner binds in a store namespace (templates/api-rbac.yaml).
+            - name: STORE_INSTALLER_ROLE
+              value: {{ include "platform.storeInstallerRole" . | quote }}
+            # Lets provisioned store namespaces allow their Helm job to reach the API server (DESIGN §10.2.2).
+            - name: KUBE_API_ENDPOINTS
+              value: {{ include "platform.apiServerEndpoints" . | quote }}
             # Encrypts upstream MCP credentials at rest (gateway/crypto.ts).
             - name: GATEWAY_ENC_KEY
               valueFrom:

@@ -23,7 +23,7 @@ import {
 } from "./billing";
 import { addEvent, openDb } from "./db";
 import { registerLegacySaasGate } from "./features";
-import { applyMysqlBackupJob, findJobPodName, makeKubeClients, readPodLogs, waitForJob } from "./kube";
+import { applyMysqlBackupJob, findJobPodName, makeKubeClients, parseApiServerEndpoints, readPodLogs, waitForJob } from "./kube";
 import { computeMetrics, renderPrometheus } from "./metrics.js";
 import { startReconciler } from "./provisioner";
 import { makeTokenBucket } from "./ratelimit";
@@ -36,6 +36,9 @@ import { createRegistry } from "./gateway/registry";
 import { registerServerRoutes } from "./gateway/routes";
 import { parseSeedServers, startSeeding } from "./gateway/seed";
 import { createGuardedFetch, ssrfPolicyFromEnv } from "./gateway/ssrf";
+import { registerStoreServer, removeStoreServers } from "./gateway/storeServers";
+import { createGatewayMetrics } from "./gateway/metrics";
+import { parseToolMode } from "./gateway/toolSearch";
 import { createUpstreamPool } from "./gateway/upstreams";
 import { applyAdminEmails, roleOf as storedRoleOf, signupRole } from "./team/members";
 import { registerTeamRoutes } from "./team/routes";
@@ -128,7 +131,12 @@ async function main() {
   const STORE_PUBLIC_SCHEME = process.env.STORE_PUBLIC_SCHEME?.trim() || "http";
   const STORE_PUBLIC_PORT = process.env.STORE_PUBLIC_PORT?.trim() ?? "";
   const INGRESS_CLASS = process.env.INGRESS_CLASS_NAME ?? "nginx";
-  const STORE_CHART_REF = process.env.STORE_CHART_REF ?? "bitnami/wordpress";
+  // Provisioned stores (DESIGN §11): image with helm + charts/store-woocommerce, and which of the
+  // chart's values files applies here (local/prod).
+  const STORE_CHART_IMAGE = process.env.STORE_CHART_IMAGE?.trim() || "store-platform/store-chart:dev";
+  const STORE_CHART_ENV = process.env.STORE_CHART_ENV?.trim() || "local";
+  // API server endpoint(s) as pods reach them, for the store namespaces' NetworkPolicy (SYSTEM.md L30).
+  const KUBE_API_ENDPOINTS = parseApiServerEndpoints(process.env.KUBE_API_ENDPOINTS);
   const HOST = process.env.HOST ?? "0.0.0.0";
   const PORT = parsePositiveInt(process.env.PORT, 8000);
   const MAX_STORES = parsePositiveInt(process.env.MAX_STORES, 3);
@@ -364,17 +372,9 @@ async function main() {
       .get(backupId);
   }
 
-  const stopReconciler = startReconciler(db, kube, {
-    baseDomain: BASE_DOMAIN,
-    ingressClassName: INGRESS_CLASS,
-    chartRef: STORE_CHART_REF,
-    storePublicScheme: STORE_PUBLIC_SCHEME,
-    storePublicPort: STORE_PUBLIC_PORT,
-  });
-
   app.addHook("onRequest", async (req, reply) => {
     if (!rateLimitEnabled || req.method === "OPTIONS") return;
-    if (["/healthz", "/metrics"].includes(pathnameOf(req.url))) return;
+    if (pathnameOf(req.url) === "/healthz") return;
 
     const decision = globalLimiter(req.ip);
     reply.header("x-ratelimit-limit", String(decision.limit));
@@ -394,7 +394,13 @@ async function main() {
   const registry = createRegistry(db, loadEncKey(), ssrfPolicy);
   const upstreamPool = createUpstreamPool({ fetch: createGuardedFetch(ssrfPolicy) });
   const health = createHealthChecker(db, registry, upstreamPool);
-  const gateway = createGatewayCore(db, registry, upstreamPool, health);
+  const gatewayMetrics = createGatewayMetrics();
+  const gateway = createGatewayCore(db, registry, upstreamPool, health, {
+    metrics: gatewayMetrics,
+    toolMode: parseToolMode(process.env.GATEWAY_TOOL_MODE),
+    autoThreshold: parsePositiveInt(process.env.GATEWAY_TOOL_AUTO_THRESHOLD, 40),
+    pinTools: parseBoolean(process.env.GATEWAY_PIN_TOOLS, true),
+  });
   registerMcpEndpoint(app, {
     db,
     core: gateway,
@@ -428,24 +434,57 @@ async function main() {
     dashboardUrl: DASHBOARD_PUBLIC_URL,
   });
   health.start();
+  // Upstream credentials live in the upstream's own namespace, so they are read through the
+  // Kubernetes API, not mounted (DESIGN §10.1).
+  const readSecret = async (namespace: string, name: string, key: string) => {
+    const { body } = await kube.core.readNamespacedSecret(name, namespace);
+    const value = body.data?.[key];
+    if (!value) throw new Error(`Secret ${namespace}/${name} has no key '${key}'`);
+    return Buffer.from(value, "base64").toString("utf8");
+  };
   const stopSeeding = startSeeding(
     registry,
     health,
     parseSeedServers(process.env.GATEWAY_SEED_SERVERS),
-    async ({ namespace, name, key }) => {
-      const { body } = await kube.core.readNamespacedSecret(name, namespace);
-      const value = body.data?.[key];
-      if (!value) throw new Error(`Gateway seed: Secret ${namespace}/${name} has no key '${key}'`);
-      return Buffer.from(value, "base64").toString("utf8");
-    },
+    ({ namespace, name, key }) => readSecret(namespace, name, key),
     app.log,
+  );
+
+  // Store provisioning (bonus, DESIGN §11). Started after the gateway, because a Ready store
+  // registers its own MCP server and a deleted one removes it first.
+  const storeServerDeps = { db, registry, health, pool: upstreamPool, readSecret };
+  const stopReconciler = startReconciler(
+    db,
+    kube,
+    {
+      baseDomain: BASE_DOMAIN,
+      ingressClassName: INGRESS_CLASS,
+      chartImage: STORE_CHART_IMAGE,
+      chartEnv: STORE_CHART_ENV,
+      apiServer: KUBE_API_ENDPOINTS,
+      installerRole: process.env.STORE_INSTALLER_ROLE?.trim() || "platform-store-installer",
+      storePublicScheme: STORE_PUBLIC_SCHEME,
+      storePublicPort: STORE_PUBLIC_PORT,
+    },
+    {
+      onReady: async (store) => {
+        await registerStoreServer(storeServerDeps, store);
+      },
+      onRemove: async (storeId) => {
+        removeStoreServers(storeServerDeps, storeId);
+      },
+    },
   );
 
   app.get("/healthz", async () => ({ ok: true }));
   app.get("/config", async () => ({ features: { legacySaas: LEGACY_SAAS }, gateway: { url: GATEWAY_PUBLIC_URL } }));
-  app.get("/metrics", async (_req, reply) => {
+  // Prometheus metrics on their own port (METRICS_PORT, default 9464), never on the public API port:
+  // per-tool counters would tell anyone which tools exist, including admin-only ones (S2, S8).
+  // No Ingress routes this port; the NetworkPolicy admits only the monitoring namespace.
+  const metricsApp = Fastify({ logger: false });
+  metricsApp.get("/metrics", async (_req, reply) => {
     reply.header("content-type", "text/plain; version=0.0.4");
-    return renderPrometheus(computeMetrics(db));
+    return renderPrometheus(computeMetrics(db)) + gatewayMetrics.render(registry.list());
   });
 
   app.post("/auth/signup", async (req, reply) => {
@@ -642,28 +681,40 @@ async function main() {
     return db.prepare(`select * from store_events where store_id=? order by ts desc, id desc limit 200`).all(access.row.id);
   });
 
+  // Stores from our chart keep credentials in Secret wc-<id>-credentials; stores provisioned
+  // before the switch (Bitnami chart) used store-secrets-<id> with other key names.
+  async function storeCredentials(row: { id: string; namespace: string }) {
+    const decode = (data: Record<string, string>, key: string) => (data[key] ? Buffer.from(data[key], "base64").toString("utf8") : null);
+    try {
+      const { body } = await kube.core.readNamespacedSecret(`wc-${row.id}-credentials`, row.namespace);
+      const data = body.data ?? {};
+      return {
+        wordpressPassword: decode(data, "wordpress-admin-password"),
+        mariadbRootPassword: decode(data, "mariadb-root-password"),
+        mariadbPassword: decode(data, "mariadb-password"),
+      };
+    } catch {
+      const { body } = await kube.core.readNamespacedSecret(`store-secrets-${row.id}`, row.namespace);
+      const data = body.data ?? {};
+      return {
+        wordpressPassword: decode(data, "wp_admin_password"),
+        mariadbRootPassword: decode(data, "mariadb_root_password"),
+        mariadbPassword: decode(data, "mariadb_password"),
+      };
+    }
+  }
+
   app.get("/stores/:id/credentials", async (req, reply) => {
     const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
-
-    const secret = await kube.core.readNamespacedSecret(`store-secrets-${access.row.id}`, access.row.namespace);
-    const data = secret.body.data ?? {};
-    const get = (key: string) => (data[key] ? Buffer.from(data[key], "base64").toString("utf8") : null);
-
-    return {
-      wordpressUsername: "admin",
-      wordpressPassword: get("wp_admin_password"),
-      mariadbRootPassword: get("mariadb_root_password"),
-      mariadbPassword: get("mariadb_password"),
-    };
+    return { wordpressUsername: "admin", ...(await storeCredentials(access.row)) };
   });
 
   app.get("/stores/:id/summary", async (req, reply) => {
     const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
-    const secret = await kube.core.readNamespacedSecret(`store-secrets-${access.row.id}`, access.row.namespace);
-    const data = secret.body.data ?? {};
+    const credentials = await storeCredentials(access.row).catch(() => null);
     const owner = db
       .prepare(
         `select u.name as owner_name, u.email as owner_email
@@ -672,8 +723,6 @@ async function main() {
          where s.id=?`
       )
       .get(access.row.id) as { owner_name: string | null; owner_email: string | null } | undefined;
-    const get = (key: string) => (data[key] ? Buffer.from(data[key], "base64").toString("utf8") : null);
-
     return {
       id: access.row.id,
       name: access.row.name,
@@ -685,7 +734,7 @@ async function main() {
       domainLastError: access.row.domain_last_error,
       lastBackupAt: access.row.last_backup_at,
       wordpressUsername: "admin",
-      wordpressPassword: get("wp_admin_password"),
+      wordpressPassword: credentials?.wordpressPassword ?? null,
       ownerName: owner?.owner_name ?? null,
       ownerEmail: owner?.owner_email ?? null,
     };
@@ -824,7 +873,8 @@ async function main() {
 
     return {
       ok: true,
-      jobName: `helm-upgrade-${access.row.id}`,
+      // The reconciler runs the same idempotent `helm upgrade --install` job as for a new store.
+      jobName: `helm-install-${access.row.id}`,
       release: `wc-${access.row.id}`,
       namespace: access.row.namespace,
     };
@@ -893,6 +943,8 @@ async function main() {
     const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
+    // Its MCP server goes first, so clients stop seeing store_<id>__* tools right away (DESIGN §11).
+    removeStoreServers(storeServerDeps, access.row.id);
     db.prepare(`update stores set status='Deleting', updated_at=datetime('now') where id=?`).run(access.row.id);
     addEvent(db, access.row.id, "delete_requested", `ns=${access.row.namespace}`, access.actor);
     try {
@@ -920,6 +972,7 @@ async function main() {
   });
 
   app.addHook("onClose", async () => {
+    await metricsApp.close();
     stopSeeding();
     health.stop();
     await upstreamPool.closeAll();
@@ -947,6 +1000,7 @@ async function main() {
   });
 
   await app.listen({ port: PORT, host: HOST });
+  await metricsApp.listen({ port: parsePositiveInt(process.env.METRICS_PORT, 9464), host: HOST });
 }
 
 main().catch((err) => {

@@ -81,9 +81,12 @@ export async function applyLimitRange(core: k8s.CoreV1Api, ns: string) {
         {
           type: "Container",
           defaultRequest: { cpu: "100m", memory: "128Mi" },
-          default: { cpu: "500m", memory: "512Mi" } as any,
+          // The client model names this field `_default` (`default` is reserved in JS). A plain
+          // `default` key is silently dropped, and Kubernetes then uses `max` as every container's
+          // limit, so a single store exceeds its own quota (SYSTEM.md L32).
+          _default: { cpu: "500m", memory: "512Mi" },
           max: { cpu: "2", memory: "2Gi" },
-        } as any,
+        },
       ],
     },
   };
@@ -96,59 +99,29 @@ export async function applyLimitRange(core: k8s.CoreV1Api, ns: string) {
   }
 }
 
-export async function applyNetworkPolicy(net: k8s.NetworkingV1Api, ns: string) {
-  const name = "default-deny";
-  const body: k8s.V1NetworkPolicy = {
-    metadata: { name },
-    spec: {
-      podSelector: {},
-      policyTypes: ["Ingress", "Egress"],
-      ingress: [
-        {
-          from: [{ podSelector: {} }],
-        },
-        {
-          from: [
-            {
-              namespaceSelector: {
-                matchLabels: { "kubernetes.io/metadata.name": "ingress-nginx" },
-              },
-            },
-          ],
-        },
-        {
-          from: [
-            {
-              namespaceSelector: {
-                matchLabels: { "kubernetes.io/metadata.name": "platform" },
-              },
-            },
-          ],
-        },
-      ],
-      egress: [
-        {
-          to: [
-            {
-              namespaceSelector: {
-                matchLabels: { "kubernetes.io/metadata.name": "ingress-nginx" },
-              },
-            },
-          ],
-        },
-        { to: [{ podSelector: {} }] },
-        {
-          to: [{ ipBlock: { cidr: "0.0.0.0/0" } }],
-          ports: [
-            { protocol: "TCP", port: 443 },
-            { protocol: "TCP", port: 53 },
-            { protocol: "UDP", port: 53 },
-          ] as any,
-        },
-      ],
-    },
-  };
+// Address of the Kubernetes API server as pods reach it (after kube-proxy's rewrite), e.g.
+// 192.168.49.2:8443 on minikube. NetworkPolicies must name this, not the ClusterIP (SYSTEM.md L30).
+export type ApiServerEndpoint = { ip: string; port: number };
 
+// "192.168.49.2:8443,10.0.0.5:6443" (env KUBE_API_ENDPOINTS, filled by the platform chart).
+export function parseApiServerEndpoints(raw: string | undefined): ApiServerEndpoint[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const i = s.lastIndexOf(":");
+      return { ip: s.slice(0, i), port: Number(s.slice(i + 1)) };
+    })
+    .filter((e) => /^[0-9a-f.:]+$/i.test(e.ip) && Number.isInteger(e.port) && e.port > 0);
+}
+
+// Pods of the provisioner's Helm jobs carry this label, so a policy can give them (and only them)
+// access to the Kubernetes API.
+export const HELM_JOB_LABELS = { "app.kubernetes.io/name": "store-helm" };
+
+async function upsertNetworkPolicy(net: k8s.NetworkingV1Api, ns: string, body: k8s.V1NetworkPolicy) {
+  const name = body.metadata!.name!;
   try {
     await net.replaceNamespacedNetworkPolicy(name, ns, body);
   } catch (e: any) {
@@ -157,35 +130,70 @@ export async function applyNetworkPolicy(net: k8s.NetworkingV1Api, ns: string) {
   }
 }
 
+// Namespace guardrails for a provisioned store: deny everything by default, let every pod use
+// DNS, and let only the Helm job talk to the Kubernetes API. The store chart adds its own allows
+// for WordPress, MariaDB, woo-mcp and the init job (DESIGN §10.2.2), the same ones store-default uses.
+export async function applyNetworkPolicy(net: k8s.NetworkingV1Api, ns: string, apiServer: ApiServerEndpoint[]) {
+  await upsertNetworkPolicy(net, ns, {
+    metadata: { name: "default-deny" },
+    spec: { podSelector: {}, policyTypes: ["Ingress", "Egress"] },
+  });
+  await upsertNetworkPolicy(net, ns, {
+    metadata: { name: "allow-dns" },
+    spec: {
+      podSelector: {},
+      policyTypes: ["Egress"],
+      egress: [
+        {
+          to: [
+            {
+              namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } },
+              podSelector: { matchLabels: { "k8s-app": "kube-dns" } },
+            },
+          ],
+          ports: [
+            { protocol: "UDP", port: 53 },
+            { protocol: "TCP", port: 53 },
+          ] as any,
+        },
+      ],
+    },
+  });
+  // Without a known endpoint (running outside the chart), fall back to the usual API server ports.
+  const rules: k8s.V1NetworkPolicyEgressRule[] = apiServer.length
+    ? apiServer.map((e) => ({ to: [{ ipBlock: { cidr: `${e.ip}/32` } }], ports: [{ protocol: "TCP", port: e.port }] as any }))
+    : [{ to: [{ ipBlock: { cidr: "0.0.0.0/0" } }], ports: [443, 6443, 8443].map((port) => ({ protocol: "TCP", port })) as any }];
+  await upsertNetworkPolicy(net, ns, {
+    metadata: { name: "helm-job-to-api-server" },
+    spec: { podSelector: { matchLabels: HELM_JOB_LABELS }, policyTypes: ["Egress"], egress: rules },
+  });
+}
+
+// Lets the namespace's default ServiceAccount (the Helm job's) install the store chart, and nothing
+// else: a RoleBinding to the narrow store-installer ClusterRole (ROADMAP S6), valid only in this namespace.
 export async function ensureNamespaceHelmAccess(
   rbac: k8s.RbacAuthorizationV1Api,
   ns: string,
+  roleName: string,
   serviceAccountName = "default"
 ) {
   const name = "store-helm-admin";
   const body: k8s.V1RoleBinding = {
     metadata: { name },
-    roleRef: {
-      apiGroup: "rbac.authorization.k8s.io",
-      kind: "ClusterRole",
-      name: "admin",
-    },
-    subjects: [
-      {
-        kind: "ServiceAccount",
-        name: serviceAccountName,
-        namespace: ns,
-      },
-    ],
+    roleRef: { apiGroup: "rbac.authorization.k8s.io", kind: "ClusterRole", name: roleName },
+    subjects: [{ kind: "ServiceAccount", name: serviceAccountName, namespace: ns }],
   };
 
+  let existing: k8s.V1RoleBinding | null = null;
   try {
-    await rbac.replaceNamespacedRoleBinding(name, ns, body);
+    existing = (await rbac.readNamespacedRoleBinding(name, ns)).body;
   } catch (e: any) {
-    const code = e?.statusCode ?? e?.response?.statusCode ?? e?.response?.status;
-    if (code !== 404) throw e;
-    await rbac.createNamespacedRoleBinding(ns, body);
+    if (statusCodeOf(e) !== 404) throw e;
   }
+  if (existing && existing.roleRef.name === roleName) return;
+  // roleRef is immutable: a store created when this bound "admin" gets its binding replaced.
+  if (existing) await rbac.deleteNamespacedRoleBinding(name, ns);
+  await rbac.createNamespacedRoleBinding(ns, body);
 }
 
 async function deleteJobIfExists(batch: k8s.BatchV1Api, ns: string, jobName: string) {
@@ -197,77 +205,110 @@ async function deleteJobIfExists(batch: k8s.BatchV1Api, ns: string, jobName: str
   }
 }
 
-export async function applyHelmJob(
-  batch: k8s.BatchV1Api,
-  ns: string,
-  jobName: string,
-  helmArgs: { valuesYaml: string; release: string; chartRef: string }
-) {
-  const body: k8s.V1Job = {
-    metadata: { name: jobName },
+async function jobState(batch: k8s.BatchV1Api, ns: string, jobName: string): Promise<"missing" | "running" | "finished"> {
+  try {
+    const { body } = await batch.readNamespacedJob(jobName, ns);
+    const s = body.status;
+    return (s?.succeeded ?? 0) >= 1 || (s?.failed ?? 0) >= 1 ? "finished" : "running";
+  } catch (e: any) {
+    if (statusCodeOf(e) === 404) return "missing";
+    throw e;
+  }
+}
+
+// Deletion is asynchronous (the Job and its pod go away in the background), and creating a Job
+// with the same name before it is gone fails with 409. So wait until it really is gone.
+async function deleteJobAndWait(batch: k8s.BatchV1Api, ns: string, jobName: string, timeoutMs = 60_000) {
+  try {
+    await batch.deleteNamespacedJob(jobName, ns, undefined, undefined, 0, undefined, "Foreground");
+  } catch (e: any) {
+    if (statusCodeOf(e) !== 404) throw e;
+  }
+  const start = Date.now();
+  while ((await jobState(batch, ns, jobName)) !== "missing") {
+    if (Date.now() - start > timeoutMs) throw new Error(`Job ${ns}/${jobName} still deleting after ${timeoutMs / 1000} s (timeout)`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+// Start the job unless an earlier attempt's job is still running: then the caller just waits for
+// it. Killing a running `helm upgrade` would leave the release stuck in a pending state.
+async function startJob(batch: k8s.BatchV1Api, ns: string, job: k8s.V1Job): Promise<"started" | "attached"> {
+  const name = job.metadata!.name!;
+  const state = await jobState(batch, ns, name);
+  if (state === "running") return "attached";
+  if (state === "finished") await deleteJobAndWait(batch, ns, name);
+  await batch.createNamespacedJob(ns, job);
+  return "started";
+}
+
+// The Helm jobs run the store-chart image (alpine/helm + charts/store-woocommerce baked in at /chart),
+// as a non-root user with a read-only root filesystem; helm only needs a writable HOME (/tmp).
+function helmJob(jobName: string, image: string, script: string): k8s.V1Job {
+  return {
+    metadata: { name: jobName, labels: HELM_JOB_LABELS },
     spec: {
       backoffLimit: 0,
       template: {
+        metadata: { labels: HELM_JOB_LABELS },
         spec: {
           restartPolicy: "Never",
+          securityContext: { runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, seccompProfile: { type: "RuntimeDefault" } },
           containers: [
             {
               name: "helm",
-              image: "alpine/helm:3.14.4",
-              command: ["sh", "-lc"],
-              args: [
-                [
-                  "set -euo pipefail",
-                  "helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true",
-                  "cat > /tmp/values.yaml <<'YAML'\n" + helmArgs.valuesYaml + "\nYAML",
-                  `helm upgrade --install ${helmArgs.release} ${helmArgs.chartRef} -n ${ns} -f /tmp/values.yaml`,
-                ].join("\n"),
-              ],
+              image,
+              imagePullPolicy: "IfNotPresent",
+              command: ["sh", "-c"],
+              args: [script],
+              env: [{ name: "HOME", value: "/tmp" }],
+              resources: { requests: { cpu: "50m", memory: "64Mi" }, limits: { cpu: "500m", memory: "256Mi" } },
+              securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } },
+              volumeMounts: [{ name: "tmp", mountPath: "/tmp" }],
             },
           ],
+          volumes: [{ name: "tmp", emptyDir: {} }],
         },
       },
     },
   };
+}
 
-  await deleteJobIfExists(batch, ns, jobName);
-  await batch.createNamespacedJob(ns, body);
+// Install or upgrade one store: chart defaults, then the environment's values file (local/prod,
+// also baked into the image), then this store's own values. `helm upgrade --install` is idempotent,
+// so a retry after a crash just converges. Helm waits for the store-init hook job.
+export async function applyHelmJob(
+  batch: k8s.BatchV1Api,
+  ns: string,
+  jobName: string,
+  args: { image: string; release: string; chartDir: string; envValues: string; valuesYaml: string }
+) {
+  const rel = `${args.release} -n ${ns}`;
+  const script = [
+    "set -eu",
+    "cat > /tmp/values.yaml <<'YAML'\n" + args.valuesYaml + "\nYAML",
+    // A helm process killed mid-operation leaves the release "pending-*", and helm then refuses
+    // every new operation. Recover first: undo a half-done upgrade, or remove a half-done first
+    // install (its Secret and volumes are kept: resource-policy keep / volumeClaimTemplates).
+    `status=$(helm status ${rel} -o json 2>/dev/null | grep -o '"status":"pending-[a-z]*"' | head -1 || true)`,
+    `case "$status" in`,
+    `  *pending-install*) echo "recovering: uninstall half-installed release"; helm uninstall ${rel} --wait ;;`,
+    `  *pending-*) echo "recovering: roll back $status"; helm rollback ${rel} --wait ;;`,
+    `esac`,
+    `helm upgrade --install ${rel} ${args.chartDir} ` +
+      `-f ${args.chartDir}/values.yaml -f ${args.chartDir}/values-${args.envValues}.yaml -f /tmp/values.yaml --timeout 15m`,
+  ].join("\n");
+  return startJob(batch, ns, helmJob(jobName, args.image, script));
 }
 
 export async function applyHelmUninstallJob(
   batch: k8s.BatchV1Api,
   ns: string,
   jobName: string,
-  args: { release: string }
+  args: { image: string; release: string }
 ) {
-  const body: k8s.V1Job = {
-    metadata: { name: jobName },
-    spec: {
-      backoffLimit: 0,
-      template: {
-        spec: {
-          restartPolicy: "Never",
-          containers: [
-            {
-              name: "helm",
-              image: "alpine/helm:3.14.4",
-              command: ["sh", "-lc"],
-              args: [
-                [
-                  "set -euo pipefail",
-                  "helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true",
-                  `helm uninstall ${args.release} -n ${ns} || true`,
-                ].join("\n"),
-              ],
-            },
-          ],
-        },
-      },
-    },
-  };
-
-  await deleteJobIfExists(batch, ns, jobName);
-  await batch.createNamespacedJob(ns, body);
+  const script = ["set -eu", `helm uninstall ${args.release} -n ${ns} --wait || true`].join("\n");
+  return startJob(batch, ns, helmJob(jobName, args.image, script));
 }
 
 export async function applyMysqlBackupJob(

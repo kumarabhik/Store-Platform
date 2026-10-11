@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Db } from "../db";
 import type { HealthChecker } from "./health";
-import type { Role } from "./policy";
+import { allows, loadPolicy, type MinRole, type Role } from "./policy";
 import { RegistryError, type Registry } from "./registry";
 import type { UpstreamPool } from "./upstreams";
 
@@ -40,17 +40,44 @@ export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDep
     throw err;
   }
 
-  const toolsOf = (serverId: string) =>
-    db.prepare(`select name, description from mcp_tools where server_id = ? order by name`).all(serverId) as { name: string; description: string | null }[];
+  // Each tool with its effective rule (S2): min_role and whether it comes from a rule on the tool,
+  // on the whole server, or the default (destructive tools are admin-only).
+  const toolsOf = (serverId: string) => {
+    const policy = loadPolicy(db);
+    const rows = db
+      .prepare(`select name, description, annotations, definition_hash, approved_hash from mcp_tools where server_id = ? order by name`)
+      .all(serverId) as { name: string; description: string | null; annotations: string | null; definition_hash: string; approved_hash: string | null }[];
+    return rows.map((t) => {
+      const { minRole, source } = policy.decide(serverId, t.name, t.annotations ? JSON.parse(t.annotations) : undefined);
+      // changed: the upstream now describes this tool differently than what was approved; it is
+      // hidden from everyone until an admin approves it (pinning, S6).
+      return { name: t.name, description: t.description, min_role: minRole, policy_source: source, changed: t.definition_hash !== t.approved_hash };
+    });
+  };
 
   app.get("/api/servers", async (req, reply) => {
     const c = caller(req, reply, false);
     if (!c) return;
     const servers = registry.list();
-    if (c.role === "admin") return { servers: servers.map((s) => ({ ...s, tools: toolsOf(s.id) })) };
-    // Members: names and tools only. URLs and auth details are infrastructure, not theirs to see.
+    if (c.role === "admin") {
+      return {
+        servers: servers.map((s) => {
+          const tools = toolsOf(s.id);
+          return { ...s, tools, changed_tools: tools.filter((t) => t.changed).length };
+        }),
+      };
+    }
+    // Members: names and the tools they may use only. URLs and auth details are infrastructure,
+    // and an admin-only tool is as invisible here as it is in tools/list.
     return {
-      servers: servers.map((s) => ({ id: s.id, slug: s.slug, name: s.name, enabled: s.enabled, status: s.status, tools: toolsOf(s.id).map((t) => t.name) })),
+      servers: servers.map((s) => ({
+        id: s.id,
+        slug: s.slug,
+        name: s.name,
+        enabled: s.enabled,
+        status: s.status,
+        tools: toolsOf(s.id).filter((t) => !t.changed && allows(c.role, t.min_role)).map((t) => t.name),
+      })),
     };
   });
 
@@ -86,6 +113,33 @@ export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDep
       registry.delete(id);
       pool.drop(id);
       return { ok: true };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Who may use one tool (ROADMAP S2): "member", "admin", "nobody", or null to go back to the default.
+  // tool "*" sets the rule for every tool of the server that has no rule of its own.
+  app.put("/api/servers/:id/tools/:tool/policy", async (req, reply) => {
+    if (!caller(req, reply, true)) return;
+    const { id, tool } = req.params as { id: string; tool: string };
+    const minRole = (req.body as { min_role?: MinRole | null } | undefined)?.min_role;
+    if (minRole === undefined) return reply.code(400).send({ error: "invalid", message: "Gateway: body needs min_role (member, admin, nobody or null)" });
+    try {
+      registry.setToolPolicy(id, tool, minRole);
+      return { tools: toolsOf(id) };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Accept the current definitions of a server's changed tools after reviewing them (pinning, S6).
+  app.post("/api/servers/:id/approve-tools", async (req, reply) => {
+    if (!caller(req, reply, true)) return;
+    const { id } = req.params as { id: string };
+    try {
+      const approved = registry.approveTools(id);
+      return { approved, tools: toolsOf(id) };
     } catch (err) {
       return fail(reply, err);
     }

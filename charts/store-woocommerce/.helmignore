@@ -1,0 +1,4 @@
+# Image build files for the store-chart image; not part of the chart.
+Dockerfile
+.dockerignore
+.helmignore

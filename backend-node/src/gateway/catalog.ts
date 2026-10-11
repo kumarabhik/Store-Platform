@@ -52,6 +52,8 @@ export function sanitizeDescription(serverName: string, description: string | nu
 }
 
 interface ToolRow {
+  definition_hash: string;
+  approved_hash: string | null;
   server_id: string;
   name: string;
   description: string | null;
@@ -65,11 +67,13 @@ interface ToolRow {
 
 // Every tool this role may see, sorted by exposed name (stable order helps clients' prompt caching).
 // role = null skips the policy filter; callTool uses that to tell "denied" from "not found" in the audit log.
-export function buildCatalog(db: Db, role: Role | null, now: number = Date.now()): CatalogEntry[] {
+// pin: hide tools whose definition changed since an admin (or first sight) approved it (S6).
+export function buildCatalog(db: Db, role: Role | null, opts: { pin?: boolean; now?: number } = {}): CatalogEntry[] {
+  const { pin = true, now = Date.now() } = opts;
   const policy = loadPolicy(db);
   const rows = db
     .prepare(
-      `select t.server_id, t.name, t.description, t.input_schema, t.annotations,
+      `select t.server_id, t.name, t.description, t.input_schema, t.annotations, t.definition_hash, t.approved_hash,
               s.slug, s.name as server_name, s.status, s.last_ok_at
        from mcp_tools t join mcp_servers s on s.id = t.server_id
        where s.enabled = 1`,
@@ -78,8 +82,10 @@ export function buildCatalog(db: Db, role: Role | null, now: number = Date.now()
 
   return rows
     .filter((r) => r.status === "Connected" || now - (parseDbTime(r.last_ok_at) ?? 0) < STALE_GRACE_MS)
-    .filter((r) => role === null || allows(role, policy.minRole(r.server_id, r.name)))
-    .map((r) => ({
+    .filter((r) => !pin || r.definition_hash === r.approved_hash)
+    .map((r) => ({ r, annotations: r.annotations ? (JSON.parse(r.annotations) as Record<string, unknown>) : undefined }))
+    .filter(({ r, annotations }) => role === null || allows(role, policy.minRole(r.server_id, r.name, annotations)))
+    .map(({ r, annotations }) => ({
       exposedName: exposedName(r.slug, r.name),
       serverId: r.server_id,
       serverSlug: r.slug,
@@ -87,7 +93,7 @@ export function buildCatalog(db: Db, role: Role | null, now: number = Date.now()
       toolName: r.name,
       description: sanitizeDescription(r.server_name, r.description),
       inputSchema: JSON.parse(r.input_schema) as Record<string, unknown>,
-      annotations: r.annotations ? (JSON.parse(r.annotations) as Record<string, unknown>) : undefined,
+      annotations,
     }))
     .sort((a, b) => (a.exposedName < b.exposedName ? -1 : a.exposedName > b.exposedName ? 1 : 0));
 }

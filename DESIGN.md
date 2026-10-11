@@ -403,6 +403,7 @@ gateway/
 - Conversation history stays in browser memory (core). Persisting chats is a non-goal.
 
 ### 7.5 Many-tools mode (stand-out #4)
+**As built** (`gateway/toolSearch.ts`): the mode is applied inside GatewayCore (`listTools` / `callTool`), so `/mcp` and the chat behave the same. Search covers only the tools the user may see (S2), and `gateway__call_tool` resolves the real tool through the normal path (policy, timeout, one audit row under the real tool name). The search itself is audited too (`gateway__search_tools`, server `gateway`). `gateway` is a reserved slug. Measured: 28 tools = 16 796 bytes of tool definitions per chat turn; search mode = 1 001 bytes. Default `auto` with threshold 40.
 `GATEWAY_TOOL_MODE = direct | search | auto` (auto switches to search when the visible tool count is above 40).
 In `search` mode, `tools/list` returns only:
 - `gateway__search_tools(query, limit≤10)`: BM25 over `exposed_name + description`. Returns names, descriptions and input schemas.
@@ -478,6 +479,7 @@ Bootstrap: the **first** user to sign up becomes admin (or an email in `ADMIN_EM
 - RBAC: the existing ClusterRole is already scoped (no `*`). Phase 8 replaces the `bind admin` RoleBinding for Helm Jobs with a narrower `store-installer` ClusterRole.
 
 ### 8.6 Untrusted upstreams (tool poisoning, rug pull)
+**As built** (S2, S6): per-tool rules live in `tool_policies`; with no rule, `destructiveHint` decides (admin) and everything else is open to members. The default store servers get explicit `create_product`/`update_order_status` admin-only rules **when they are first registered** (Helm seed `tool_policies`, provisioner `STORE_TOOL_POLICIES`). *Why only on creation:* re-applying them on every start would silently undo an admin who reset a tool to the default. Pinning is trust-on-first-use: `approved_hash` is set on first sight, and the hash includes annotations, so dropping `destructiveHint` counts as a change. `GATEWAY_PIN_TOOLS=false` turns it off.
 - **Namespacing** prevents shadowing (§6.5).
 - **Description sanitizing**: strip control and zero-width characters, cap length, and show the full description to admins in the Servers page so it can be reviewed.
 - **Pinning** (stand-out): first sight of a tool stores `definition_hash`, and an admin "approves" the server (sets `approved_hash`). If an upstream later changes a description or schema, the tool is **hidden** and the server shows "⚠ 2 tools changed — review", which defends against rug pulls (ETDI).
@@ -560,6 +562,24 @@ CPU limits are intentionally unset (CFS throttling hurts latency). Memory limits
 - The gateway itself stays at `api.<domain>/mcp`: external MCP clients aren't browsers, so same-origin buys nothing there, and that path already has its own no-buffering Ingress.
 - `dashboard.enabled: false` renders no dashboard objects at all (it used to leave a pod in `ImagePullBackOff`).
 
+### 10.2.2 NetworkPolicies (as built)
+Every namespace we own is **default-deny in both directions**; each chart adds only the paths its pods need. Verified with 36 connection tests, including negative ones (`scripts/verify-store-isolation.sh`).
+
+| Pod | May receive from | May send to |
+|---|---|---|
+| platform-api | ingress controller, dashboard pods (:8000) | DNS; K8s API server; pods in any namespace on :80 and :3000-9999 (their own ingress policies decide); public :443 (LLM), never private ranges or 169.254/16 |
+| dashboard | ingress controller (:8080) | DNS; platform-api (:8000) |
+| wordpress | ingress controller, platform namespace, own namespace (:80) | DNS; its MariaDB (:3306); public :80/:443 (updates, plugins) |
+| store-init job | — | DNS; its MariaDB; public :80/:443 (downloads WooCommerce) |
+| mariadb | its WordPress and init job (:3306) | nothing |
+| woo-mcp | platform-api only (:3000) | DNS; its WordPress (:80) |
+| notes-mcp, everything-mcp | platform-api only | **nothing**, not even DNS |
+
+- **API server address:** Calico checks egress *after* kube-proxy's DNAT, so a rule for the `kubernetes` ClusterIP (10.96.0.1:443) would never match; the packet's real destination is the API server endpoint (minikube: 192.168.49.2:8443, k3s: node IP :6443). The chart reads `default/kubernetes` Endpoints with Helm `lookup` at install time and allows exactly that IP and port. `helm template` has no cluster, so it renders a fallback from values (`networkPolicy.apiServer`). If the API server's address ever changes, a `helm upgrade` picks it up.
+- *Why egress to pods is limited by port only, not by namespace:* the bonus stores live in `store-<id>` namespaces created at runtime, and a NetworkPolicy can't select namespaces by name prefix. The receiving side already has strict ingress policies, so the platform's egress rule only has to stop it from reaching odd ports (databases on 3306 stay unreachable: verified).
+- *Side effect:* a killed upstream now shows "timed out after 3000 ms" instead of `ECONNREFUSED`. A Service with no pods has no endpoint, so the packet doesn't match any allowed pod and is dropped instead of refused (SYSTEM.md L30).
+- Throwaway pods in a store namespace are not covered by the store chart's default-deny (it selects the release's pods); the namespace-wide `podSelector: {}` form is used in `platform`, which the chart fully owns.
+
 ### 10.3 Local vs production (values only)
 | Concern | `values-local.yaml` (minikube/k3d) | `values-prod.yaml` (k3s VPS) |
 |---|---|---|
@@ -590,6 +610,14 @@ To add:
 4. Isolation proof: NetworkPolicy in `store-a` allows ingress only from `store-a` pods + `platform-api` + ingress controller. Demo: `kubectl exec` into `store-b`'s woo-mcp, `curl store-a`'s wordpress → timeout.
 5. Recovery: provisioning is already idempotent and lease-protected. The MCP registration is an upsert, so a restart mid-way just re-runs it.
 6. Max stores per **user** (current code counts per IP; change it to per user).
+
+**As built** (all six done; proofs in ROADMAP B):
+- The Helm job runs image `store-chart` (`charts/store-woocommerce/Dockerfile`: `alpine/helm` + the chart at `/chart`) as uid 65534 with a read-only root filesystem. It applies `values.yaml`, then `values-<STORE_CHART_ENV>.yaml`, then only the per-store values from `engine.ts` (public URL, host, title, `existingSecret: ""`). *Why no credentials from the API:* the chart already generates them once per release and keeps them (`lookup` + `resource-policy: keep`), which is I7. The old `store-secrets-<id>`/`store_secrets` path was removed; the dashboard reads `wc-<id>-credentials` (and still falls back for pre-switch stores).
+- **Slug** is `store_<id>` (no human name): ids are fixed and unique, names can be renamed and collide. The server's display name is `Store: <name>`.
+- **Registration** lives in `gateway/storeServers.ts` and is wired as reconciler hooks (`onReady`, `onRemove`), so `provisioner.ts` doesn't import the gateway. A registration failure is retried like any transient error.
+- **Restart safety**, found while testing: (a) on retry, a still-running Helm job is *attached to*, not deleted (killing `helm upgrade` leaves the release `pending-*`); (b) the job script first recovers a release left `pending-*` by a crash (rollback, or uninstall a half-done first install; Secret and volumes are kept); (c) job deletion waits until the old Job is gone before creating the new one (409 otherwise). Proof: API restarted mid-install → `helm_job_attached` → Ready with one deployed revision.
+- **Namespace guardrails:** the provisioner applies a namespace-wide default-deny, DNS, and API-server egress for the Helm job only (endpoint from `KUBE_API_ENDPOINTS`, which the platform chart fills with `lookup`); the chart adds the same per-workload policies as `store-default`. Stricter than `store-default`: a stray pod in a store namespace can reach nothing.
+- **Max stores** was already per user (`stores.user_id`); `MAX_STORES` is 3 by default, 50 locally.
 
 ---
 

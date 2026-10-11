@@ -15,9 +15,9 @@ import {
   deleteNamespace,
   waitForAnyDeploymentAvailable,
   waitForDeploymentAvailable,
+  type ApiServerEndpoint,
 } from "./kube";
-import { ensureStoreSecretsInDb, upsertStoreSecret } from "./secrets";
-import { buildEngineValues } from "./engine";
+import { buildEngineValues, CHART_DIR } from "./engine";
 import { waitForNamespaceGone } from "./namespace";
 import { ensureLeaderTable, tryAcquireLeader } from "./leader";
 
@@ -27,7 +27,9 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<boolean> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(url, { method: "GET", signal: controller.signal }).finally(() =>
+      // Don't follow redirects: WordPress answers 301 to its public URL, which from inside the cluster
+      // may not resolve or be reachable (local: 127.0.0.1:8088). A redirect already proves it's alive.
+      const res = await fetch(url, { method: "GET", redirect: "manual", signal: controller.signal }).finally(() =>
         clearTimeout(timeout)
       );
       if (res.status >= 200 && res.status < 500) return true;
@@ -64,16 +66,30 @@ function isRetryableProvisioningError(msg: string): boolean {
     normalized.includes("connection refused") ||
     normalized.includes("ingress controller not ready") ||
     normalized.includes("eof") ||
-    normalized.includes("tls handshake")
+    normalized.includes("tls handshake") ||
+    normalized.includes("mcp registration")
   );
 }
 
 type Config = {
   baseDomain: string;
   ingressClassName: string;
-  chartRef: string;
+  // Image with helm and charts/store-woocommerce at /chart (DESIGN §11).
+  chartImage: string;
+  // Which of the chart's values files to apply: "local" or "prod".
+  chartEnv: string;
+  apiServer: ApiServerEndpoint[];
+  // ClusterRole bound for the Helm job in each store namespace (ROADMAP S6).
+  installerRole: string;
   storePublicScheme?: string;
   storePublicPort?: string;
+};
+
+// What the gateway does around a store's lifecycle (DESIGN §11): register the store's own MCP
+// server once it is Ready, and remove it before anything is torn down.
+export type StoreHooks = {
+  onReady(store: { id: string; name: string; namespace: string; release: string }): Promise<void>;
+  onRemove(storeId: string): Promise<void>;
 };
 
 type StoreRow = {
@@ -99,7 +115,7 @@ async function resolveDomainStatus(domain: string, targetHost: string) {
   return "Awaiting DNS";
 }
 
-export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => void {
+export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: StoreHooks): () => void {
   const tickMs = 2000;
   const helmInstallTimeoutMs = 20 * 60 * 1000;
   ensureLeaseColumnsSafe(db);
@@ -123,6 +139,8 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
         const ns = del.namespace as string;
 
         try {
+          // Tools first: clients must stop seeing the store before its pods go away.
+          await hooks?.onRemove(storeId);
           const exists = await namespaceExists(kube, ns);
           if (!exists) {
             addEvent(db, storeId, "delete_skip_missing_namespace", ns);
@@ -131,14 +149,14 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
           }
 
           addEvent(db, storeId, "delete_reconcile_start", `ns=${ns}`);
-          await ensureNamespaceHelmAccess(kube.rbac, ns);
+          await ensureNamespaceHelmAccess(kube.rbac, ns, cfg.installerRole);
 
           const release = `wc-${storeId}`;
           const jobName = `helm-uninstall-${storeId}`;
 
           addEvent(db, storeId, "helm_uninstall_job_create", `release=${release}`);
 
-          await applyHelmUninstallJob(kube.batch, ns, jobName, { release });
+          await applyHelmUninstallJob(kube.batch, ns, jobName, { image: cfg.chartImage, release });
 
           const res = await waitForJob(kube.batch, ns, jobName, 10 * 60 * 1000);
           if (!res.ok) throw new Error(res.reason);
@@ -181,25 +199,12 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
         addEvent(db, storeId, "reconcile_start", `ns=${ns} host=${host}`);
 
         await ensureNamespace(kube.core, ns);
-        await ensureNamespaceHelmAccess(kube.rbac, ns);
+        await ensureNamespaceHelmAccess(kube.rbac, ns, cfg.installerRole);
         await applyResourceQuota(kube.core, ns);
         await applyLimitRange(kube.core, ns);
-        await applyNetworkPolicy(kube.net, ns);
+        await applyNetworkPolicy(kube.net, ns, cfg.apiServer);
 
         addEvent(db, storeId, "guardrails_applied");
-
-        const sec = ensureStoreSecretsInDb(db, storeId);
-        const secretName = `store-secrets-${storeId}`;
-
-        await upsertStoreSecret(kube.core, ns, secretName, {
-          wp_admin_password: sec.wp_admin_password,
-          "wordpress-password": sec.wp_admin_password,
-          mariadb_root_password: sec.mariadb_root_password,
-          mariadb_password: sec.mariadb_password,
-          "mariadb-root-password": sec.mariadb_root_password,
-          "mariadb-password": sec.mariadb_password,
-        });
-        addEvent(db, storeId, "secret_ready", secretName);
 
         const release = `wc-${storeId}`;
         const jobName = `helm-install-${storeId}`;
@@ -209,14 +214,11 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
           engine,
           ingressClassName: cfg.ingressClassName,
           host,
-          secretName,
-          chartRef: cfg.chartRef,
+          publicUrl: url,
+          storeName: String(row.name ?? "").trim() || `Store ${storeId}`,
         });
 
         if (built.stubbed) throw new Error(built.reason);
-
-        const chartRef = built.chartRef;
-        const valuesYaml = built.valuesYaml;
 
         if (cfg.ingressClassName === "nginx") {
           const ingressReady = await waitForDeploymentAvailable(
@@ -228,13 +230,15 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
           if (!ingressReady) throw new Error("ingress controller not ready");
         }
 
-        addEvent(db, storeId, "helm_job_create", `release=${release}`);
-
-        await applyHelmJob(kube.batch, ns, jobName, {
+        // After an API restart the previous attempt's job may still be running; then we wait for it.
+        const job = await applyHelmJob(kube.batch, ns, jobName, {
+          image: cfg.chartImage,
           release,
-          chartRef,
-          valuesYaml,
+          chartDir: CHART_DIR,
+          envValues: cfg.chartEnv,
+          valuesYaml: built.valuesYaml,
         });
+        addEvent(db, storeId, job === "attached" ? "helm_job_attached" : "helm_job_create", `release=${release}`);
 
         const res = await waitForJob(kube.batch, ns, jobName, helmInstallTimeoutMs);
         if (!res.ok) throw new Error(res.reason);
@@ -254,6 +258,16 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config): () => v
         if (!reachable) throw new Error("store service not reachable yet");
 
         const domainStatus = customDomain ? await resolveDomainStatus(customDomain, defaultHost) : "Platform subdomain";
+
+        // Its own woo-mcp becomes store_<id>__* tools. Idempotent, so a restart here just redoes it.
+        if (hooks) {
+          try {
+            await hooks.onReady({ id: storeId, name: String(row.name ?? storeId), namespace: ns, release });
+          } catch (err: any) {
+            throw new Error(`mcp registration failed: ${String(err?.message ?? err)}`);
+          }
+          addEvent(db, storeId, "mcp_registered", `store_${storeId}`);
+        }
 
         db.prepare(
           `update stores

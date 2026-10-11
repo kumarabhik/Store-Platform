@@ -1,0 +1,128 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+# Default deny for the whole platform namespace: no pod may send or receive anything unless one
+# of the policies below allows it (DESIGN §8.5). Policies are additive, so each allow is explicit.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Every pod may resolve names (kube-dns). Nothing else is implied by this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# platform-api: called by the ingress controller (dashboard.*/api via the dashboard pod, api.*, /mcp).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "platform.apiName" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "platform.apiName" . }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+        - podSelector:
+            matchLabels:
+              app: {{ include "platform.dashboardName" . }}
+      ports:
+        - { port: 8000, protocol: TCP }
+    # Prometheus scrapes /metrics on its own port, only from the monitoring namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.metricsNamespace }}
+      ports:
+        - { port: 9464, protocol: TCP }
+  egress:
+    # Kubernetes API (the reconciler, and reading upstream credentials from Secrets). Helm looks
+    # up the real API server endpoint at install time; `helm template` has no cluster, so it
+    # falls back to the values (DESIGN §10.2.2).
+    {{- $ep := lookup "v1" "Endpoints" "default" "kubernetes" }}
+    {{- if and $ep $ep.subsets }}
+    {{- range $ep.subsets }}
+    - to:
+        {{- range .addresses }}
+        - ipBlock:
+            cidr: {{ .ip }}/32
+        {{- end }}
+      ports:
+        {{- range .ports }}
+        - { port: {{ .port }}, protocol: TCP }
+        {{- end }}
+    {{- end }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: {{ $np.apiServer.cidr }}
+      ports:
+        {{- range $np.apiServer.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+    {{- end }}
+    # Upstream MCP servers and store WordPress (readiness checks) in any namespace. Their own
+    # ingress policies decide who may connect; here only the ports are limited (80 and the
+    # SSRF guard's allowed MCP range 3000-9999, DESIGN §8.4).
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 80, protocol: TCP }
+        - { port: 3000, endPort: 9999, protocol: TCP }
+    # Public HTTPS (LLM provider). Private ranges and link-local (cloud metadata) are excluded.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml $np.privateCidrs | nindent 14 }}
+      ports:
+        - { port: 443, protocol: TCP }
+---
+# Dashboard (static files + /api proxy): reached only through the ingress controller, and it
+# only talks to platform-api.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "platform.dashboardName" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "platform.dashboardName" . }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+      ports:
+        - { port: 8080, protocol: TCP }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "platform.apiName" . }}
+      ports:
+        - { port: 8000, protocol: TCP }
+{{- end }}

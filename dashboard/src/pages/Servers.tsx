@@ -7,7 +7,9 @@ import { apiJson, errorText, formatDate, timeAgo, type Api, type AuthUser } from
 
 type AuthType = "none" | "bearer" | "header";
 
-type Tool = { name: string; description?: string | null };
+type MinRole = "member" | "admin" | "nobody";
+// min_role/policy_source come only in the admin view (ROADMAP S2).
+type Tool = { name: string; description?: string | null; min_role?: MinRole; policy_source?: "tool" | "server" | "default"; changed?: boolean };
 
 type Server = {
   id: string;
@@ -28,6 +30,8 @@ type Server = {
   last_check_at?: string | null;
   last_latency_ms?: number | null;
   consecutive_failures?: number;
+  // Tools whose definition changed since it was approved; hidden from everyone until approved (S6).
+  changed_tools?: number;
 };
 
 type RawServer = Omit<Server, "tools"> & { tools: Array<Tool | string> };
@@ -154,6 +158,26 @@ export function ServersPage({ api, user }: { api: Api; user: AuthUser }) {
       return `'${form.slug}' added. Its tools appear as ${form.slug}__<tool> once it is Connected.`;
     });
   }
+
+  const approveTools = (s: Server) => {
+    if (!window.confirm(`Approve the new definitions of ${s.changed_tools} tool(s) on '${s.slug}'? Read the changed descriptions first: a description can carry instructions aimed at the model.`)) return;
+    void run(s.id, async () => {
+      const r = await apiJson<{ approved: number }>(api, `/api/servers/${s.id}/approve-tools`, { method: "POST", json: {} });
+      return `${r.approved} tool(s) on '${s.slug}' approved and visible again.`;
+    });
+  };
+
+  // "default" removes the tool's own rule, so the default applies again (destructive -> admin).
+  const setPolicy = (s: Server, tool: Tool, value: string) =>
+    run(s.id, async () => {
+      await apiJson(api, `/api/servers/${s.id}/tools/${encodeURIComponent(tool.name)}/policy`, {
+        method: "PUT",
+        json: { min_role: value === "default" ? null : value },
+      });
+      return value === "default"
+        ? `${s.slug}__${tool.name}: back to the default rule.`
+        : `${s.slug}__${tool.name}: ${value === "nobody" ? "hidden from everyone" : `${value}s and up`}.`;
+    });
 
   const toggleExpanded = (id: string) =>
     setExpanded((current) => {
@@ -307,17 +331,48 @@ export function ServersPage({ api, user }: { api: Api; user: AuthUser }) {
               </p>
             )}
 
+            {admin && !!s.changed_tools && (
+              <div className="pinWarning">
+                <span>
+                  ⚠ {s.changed_tools} tool(s) changed since they were approved and are hidden from everyone. Review the descriptions below.
+                </span>
+                <button className="btn btnSecondary btnSmall" disabled={busy === s.id} onClick={() => approveTools(s)}>
+                  Approve changes
+                </button>
+              </div>
+            )}
+
             <button className="inlineLink" onClick={() => toggleExpanded(s.id)}>
               {expanded.has(s.id) ? "Hide" : "Show"} {s.tools.length} tools
             </button>
             {expanded.has(s.id) && (
               <ul className="toolList">
                 {s.tools.map((t) => (
-                  <li key={t.name}>
-                    <code>
-                      {s.slug}__{t.name}
-                    </code>
-                    {t.description && <span className="subtle"> {t.description}</span>}
+                  <li key={t.name} className="toolRow">
+                    <div>
+                      <code>
+                        {s.slug}__{t.name}
+                      </code>
+                      {t.changed && <span className="statusPill tone-warn">changed</span>}
+                      {t.description && <span className="subtle"> {t.description}</span>}
+                    </div>
+                    {admin && t.min_role && (
+                      <label className="policyPick" title="Who may see and call this tool (tools/list and tools/call)">
+                        <span className="subtle">Who may use it</span>
+                        <select
+                          value={t.policy_source === "tool" ? t.min_role : "default"}
+                          disabled={busy === s.id}
+                          onChange={(e) => void setPolicy(s, t, e.target.value)}
+                        >
+                          <option value="default">
+                            Default ({t.policy_source === "tool" ? "unset" : t.min_role === "member" ? "everyone" : `${t.min_role}s`})
+                          </option>
+                          <option value="member">Everyone</option>
+                          <option value="admin">Admins only</option>
+                          <option value="nobody">Nobody (hidden)</option>
+                        </select>
+                      </label>
+                    )}
                   </li>
                 ))}
                 {s.tools.length === 0 && <li className="subtle">No tools cached yet (the server has not answered a probe).</li>}

@@ -1,0 +1,3 @@
+# Build-only files; the Dockerfile itself must stay (minikube image build reads it from the context).
+.dockerignore
+.helmignore

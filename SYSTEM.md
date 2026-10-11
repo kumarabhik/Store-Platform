@@ -51,7 +51,7 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 ### L4 — Never regenerate DB passwords for an existing volume
 - **Symptom:** after a retry or upgrade, WordPress shows "Error establishing a database connection"; mariadb logs `Access denied`.
 - **Cause:** the MariaDB image sets the root/user password **only when the data dir is empty** (first boot). New random passwords in the Secret no longer match what is on the PVC.
-- **Fix:** passwords are generated once and stored in `store_secrets` (SQLite), then reused on every retry ([secrets.ts](backend-node/src/secrets.ts)). In Helm charts, use `lookup` to reuse an existing Secret's value. Invariant I7.
+- **Fix:** in Helm charts, use `lookup` to reuse an existing Secret's value and `helm.sh/resource-policy: keep` so uninstall doesn't delete it. Our store chart does this, and since the provisioner switched to it (DESIGN §11) that is the only mechanism. The old way (passwords stored in the `store_secrets` SQLite table by `secrets.ts`) was removed; the table stays because migrations are additive. Invariant I7.
 
 ### L5 — Windows + minikube (docker driver): the node IP isn't reachable from the host
 - **Symptom:** `store-xxxx.192.168.49.2.nip.io` times out in the browser on Windows.
@@ -182,6 +182,47 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Cause:** the React Compiler lint rule can't always see that the setState is behind an `await` in a `useCallback` defined elsewhere. The dashboard's tsconfig enables `erasableSyntaxOnly`, which forbids TypeScript-only runtime syntax (parameter properties, enums).
 - **Fix:** define the async loader **inside** the effect (with a `cancelled` flag, which also drops stale results when filters change), reset state in the event handler instead of in an effect ([pages/Audit.tsx](dashboard/src/pages/Audit.tsx)); declare class fields explicitly ([lib/api.ts](dashboard/src/lib/api.ts)).
 
+### L30 — Default-deny egress: allow the API server's real endpoint, and dead upstreams now time out
+- **Cause 1:** Calico applies egress policy *after* kube-proxy has rewritten the destination, so the `kubernetes` ClusterIP (10.96.0.1:443) is never what the policy sees; the packet goes to the API server endpoint (minikube `192.168.49.2:8443`, k3s node IP `:6443`).
+- **Fix 1:** the platform chart reads the `default/kubernetes` Endpoints with Helm `lookup` and allows exactly that IP and port (fallback values for `helm template`). Verified: `platform-api -> kubernetes.default.svc:443 open` in `verify-store-isolation.sh`.
+- **Symptom 2 (expected, not a bug):** with `notes-mcp` scaled to 0, the gateway reports `Upstream 'notes' timed out after 3000 ms`, where before default-deny it said `ECONNREFUSED`.
+- **Cause 2:** a Service without pods has no endpoint to DNAT to, so the packet matches no allowed pod and the policy drops it silently instead of the kernel refusing it.
+- **Carry forward:** a "timed out" for an upstream whose pods are gone is normal; check `kubectl get endpoints` before suspecting the network.
+
+### L31 — Fastify rejects a POST with `Content-Type: application/json` and an empty body
+- **Symptom:** in `scripts/dod.sh`, `POST /api/servers/:id/test` returned 400 and the script read an empty status, while the same call from the dashboard worked.
+- **Cause:** the script's curl helper always sends `Content-Type: application/json`; Fastify answers `FST_ERR_CTP_EMPTY_JSON_BODY` (400) when that header comes with no body. The browser's `fetch` sends no content type for a body-less POST.
+- **Fix:** send `-d '{}'` on body-less POSTs from scripts.
+
+### L32 — A LimitRange `default` built with the Kubernetes JS client was silently dropped
+- **Symptom:** the first store from our own chart never started WordPress or MariaDB: `pods … is forbidden: exceeded quota: store-quota, requested: limits.cpu=2, used: limits.cpu=2500m, limited: limits.cpu=4`. The live LimitRange showed `default: {cpu: 2, memory: 2Gi}`, not the 500m/512Mi in the code.
+- **Cause:** the client's model calls the field `_default` (`default` is a reserved word), and the serializer drops unknown keys, so `{ default: … } as any` sent nothing. Kubernetes then uses `max` as the default limit. The Bitnami chart set its own CPU limits, which hid the bug; our chart sets none on purpose (DESIGN §10.2).
+- **Fix:** `_default` in `applyLimitRange` ([kube.ts](backend-node/src/kube.ts)). **Carry forward:** an `as any` around a client model hides exactly this kind of mistake; check the live object (`kubectl get limitrange -o yaml`), not the code.
+
+### L33 — The provisioner's readiness check followed WordPress's redirect to an unreachable URL
+- **Symptom:** a new store ended `Failed: store service not reachable yet` after 5 minutes, although WordPress logs showed `GET / 301` from the API pod every few seconds and the store worked in the browser.
+- **Cause:** `fetch` follows redirects. WordPress answers `/` with 301 to its public URL (`http://store-<id>.127.0.0.1.nip.io:8088`), which inside the cluster resolves to 127.0.0.1 where nothing listens. The Bitnami chart's WordPress didn't redirect.
+- **Fix:** `redirect: "manual"`: a 301 already proves WordPress answers (L11: 200-499 = alive). [provisioner.ts](backend-node/src/provisioner.ts) `waitForHttp`.
+
+### L34 — Re-creating the Helm job on retry: 409 races and releases stuck "pending"
+- **Symptom:** after an API restart the store event log showed `retry_scheduled … reason=HTTP request failed` twice, and the release history had `v1 failed` (its job had been killed mid-install).
+- **Cause:** (1) the retry deleted the running job: a helm process killed mid-operation leaves the release `pending-install`/`pending-upgrade`, and helm then refuses every later operation ("another operation is in progress"). (2) Job deletion with `propagationPolicy: Foreground` returns immediately; creating the same name right after fails with 409, which the client reports only as "HTTP request failed".
+- **Fix:** a retry **attaches** to a still-running job instead of deleting it (event `helm_job_attached`); a finished job is deleted and the code **waits until it is gone** before creating; the job script recovers a `pending-*` release first (rollback, or uninstall a half-done first install). Proof: restart during install → attached → one `deployed` revision → Ready. [kube.ts](backend-node/src/kube.ts) `startJob`, `applyHelmJob`.
+
+### L35 — Seeded permission defaults must apply once, not on every start
+- **Symptom (caught in design review):** the first version re-applied the default tool rules (`create_product` admin-only) on every seed and re-registration. An admin who set the tool back to "Default" in the UI would see it turn admin-only again after the next API restart.
+- **Fix:** defaults are inserted only when a server is created (`insert or ignore`), never on update; admin choices are rows that later runs don't touch. Test: `store-servers.test.ts` "is idempotent…".
+- **Carry forward:** a "default" that keeps re-asserting itself is not a default; it's an override the admin can't remove.
+
+### L36 — With several stores connected, "create a product" is ambiguous
+- **Symptom:** `dod.sh` failed after the bonus stores existed: the chat created the product in Bharat Bazaar, and answered "orders today" for that store, not the default one.
+- **Cause:** both `woo__*` and `store_<id>__*` tools match the request; the model picked one.
+- **Fix:** the checks name the store ("in the default store (the woo tools)"). Demo prompts should do the same. The server name in each description (`[Store: Anku Shop]`) is what lets the model pick right when the user names the store.
+
+### L37 — `/metrics` on the public API port leaks the tool list
+- **Symptom (caught before shipping S8):** the API's `/metrics` was reachable through `api.<domain>`. Per-tool counters there would list admin-only tool names that `tools/list` hides from members (S2).
+- **Fix:** metrics are served by a second Fastify instance on port 9464, which no Ingress routes; the NetworkPolicy admits only the `monitoring` namespace. Public `/metrics` → 404; `verify-store-isolation.sh` checks the port is blocked from other namespaces.
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)
@@ -268,6 +309,7 @@ No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`.
 | Seeded gateway servers | `woo`, `notes`, `everything` (22 tools) | charts/platform `GATEWAY_SEED_SERVERS` |
 | Signup / invites | `AUTH_OPEN_SIGNUP=false`; invite link `DASHBOARD_PUBLIC_URL/?invite=<token>`, 7 days, single use | charts/platform, team/invites.ts |
 | Dashboard | image `store-platform/dashboard:dev` on `nginxinc/nginx-unprivileged:1.27-alpine`, uid 101, port 8080, `/healthz`; nginx proxies `/api/*` → platform-api with the prefix stripped | charts/platform `dashboard-*.yaml` |
+| Store chart image | `store-platform/store-chart:dev` (local) / `ghcr.io/kumarabhik/store-chart:<v>`: alpine/helm 3.14.4 + `charts/store-woocommerce` at `/chart`, uid 65534; env `STORE_CHART_IMAGE`, `STORE_CHART_ENV`; release `wc-<id>` in `store-<id>`, gateway slug `store_<id>` | `charts/store-woocommerce/Dockerfile`, provisioner.ts |
 | Gateway encryption key | Secret `gateway-enc-key`, key `key`, 32 random bytes base64 → env `GATEWAY_ENC_KEY` | charts/platform |
 | Default store | release/namespace `store-default`; images `wordpress:7.1.3-php8.3-apache`, `wordpress:cli-2.12.0-php8.3`, `mariadb:11.4.13`; WooCommerce 11.2.0 (latest at install, unpinned) | charts/store-woocommerce |
 | Store install time | ~1 min with cached images; first pull ~5 min | measured 2026-10-09 |

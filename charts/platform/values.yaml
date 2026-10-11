@@ -19,6 +19,26 @@ gateway:
       nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
 
+# Default-deny NetworkPolicies for the platform namespace (templates/networkpolicy.yaml).
+networkPolicy:
+  enabled: true
+  # Namespace of the ingress controller pods (ingress-nginx locally, kube-system for Traefik on k3s).
+  ingressControllerNamespace: ingress-nginx
+  # Namespace allowed to scrape platform-api's metrics port (9464).
+  metricsNamespace: monitoring
+  # Kubernetes API server for the reconciler. At install time the chart reads the real endpoint
+  # (default/kubernetes); these values are only the fallback when there is no cluster (helm template).
+  apiServer:
+    cidr: 0.0.0.0/0
+    ports: [443, 6443, 8443]
+  # Excluded from "public HTTPS" egress: private ranges and link-local (cloud metadata, 169.254.169.254).
+  privateCidrs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+
 api:
   image: "store-platform/api-node:dev"
   replicas: 1
@@ -31,7 +51,10 @@ api:
     DB_PATH: "/data/platform.db"
     BASE_DOMAIN: "127.0.0.1.nip.io"
     INGRESS_CLASS_NAME: "nginx"
-    STORE_CHART_REF: "bitnami/wordpress"
+    # Store provisioning (bonus): image with helm + charts/store-woocommerce, and which of the
+    # chart's values files to apply (local/prod).
+    STORE_CHART_IMAGE: "store-platform/store-chart:dev"
+    STORE_CHART_ENV: "local"
     BACKUP_DIR: "/data/backups"
     DASHBOARD_PUBLIC_URL: "http://dashboard.127.0.0.1.nip.io"
     # Shown on the dashboard's Connect page; external MCP clients use this URL.
@@ -64,11 +87,19 @@ api:
     MCP_KEY_RATE_LIMIT_REFILL_PER_SEC: "2"
     # Signup after the first admin exists: "false" = invite-only (DESIGN §8.1), "true" = anyone can join as member.
     AUTH_OPEN_SIGNUP: "false"
+    # Many-tools mode (DESIGN §7.5): "direct" lists every tool, "search" only gateway__search_tools +
+    # gateway__call_tool, "auto" switches to search above the threshold (fewer tokens per chat turn).
+    GATEWAY_TOOL_MODE: "auto"
+    GATEWAY_TOOL_AUTO_THRESHOLD: "40"
+    # Tool-definition pinning (DESIGN §8.6): a tool whose description/schema/annotations change after
+    # approval is hidden until an admin approves it on the Servers page (rug-pull defence).
+    GATEWAY_PIN_TOOLS: "true"
     # Browser origins allowed to call /mcp (DNS-rebinding defence). CLI clients send no Origin.
     GATEWAY_ALLOWED_ORIGINS: ""
-    # Upstreams registered at startup (managed_by=helm). Credentials are referenced by Secret
+    # Upstreams registered at startup (managed_by=helm). tool_policies: default per-tool rules (members
+    # read the store, only admins change it, ROADMAP S2); applied once, admins can change them later. Credentials are referenced by Secret
     # name/key in the upstream's own namespace and read through the Kubernetes API, never written here.
-    GATEWAY_SEED_SERVERS: '[{"slug":"woo","name":"Default store (WooCommerce)","url":"http://store-default-woo-mcp.store-default.svc.cluster.local/mcp","auth_type":"bearer","credential_secret":{"namespace":"store-default","name":"store-default-credentials","key":"mcp-token"}},{"slug":"notes","name":"Team notes","url":"http://notes-mcp.mcp-servers.svc.cluster.local/mcp","auth_type":"bearer","credential_secret":{"namespace":"mcp-servers","name":"upstreams-credentials","key":"notes-mcp-token"}},{"slug":"everything","name":"MCP reference server","url":"http://everything-mcp.mcp-servers.svc.cluster.local/mcp"}]'
+    GATEWAY_SEED_SERVERS: '[{"slug":"woo","name":"Default store (WooCommerce)","url":"http://store-default-woo-mcp.store-default.svc.cluster.local/mcp","auth_type":"bearer","credential_secret":{"namespace":"store-default","name":"store-default-credentials","key":"mcp-token"},"tool_policies":{"create_product":"admin","update_order_status":"admin"}},{"slug":"notes","name":"Team notes","url":"http://notes-mcp.mcp-servers.svc.cluster.local/mcp","auth_type":"bearer","credential_secret":{"namespace":"mcp-servers","name":"upstreams-credentials","key":"notes-mcp-token"}},{"slug":"everything","name":"MCP reference server","url":"http://everything-mcp.mcp-servers.svc.cluster.local/mcp"}]'
   persistence:
     enabled: true
     size: 1Gi

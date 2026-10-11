@@ -78,6 +78,9 @@ function Deploy-Platform {
     minikube image build -t store-platform/everything-mcp:dev mcp-servers/everything-mcp | Out-Host
     Write-Host "Building dashboard image in Minikube..."
     minikube image build -t store-platform/dashboard:dev dashboard | Out-Host
+    # helm + charts/store-woocommerce, run by the provisioner's Helm jobs for every new store (DESIGN §11).
+    Write-Host "Building store-chart image in Minikube..."
+    minikube image build -t store-platform/store-chart:dev charts/store-woocommerce | Out-Host
   } else {
     Write-Host "Skipping image build by request."
   }

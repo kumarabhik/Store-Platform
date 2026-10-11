@@ -1,185 +1,100 @@
-# Store Platform → Team MCP Gateway on Kubernetes
+# WooCommerce hosting with a team MCP gateway on Kubernetes
 
-This repo provisions isolated WooCommerce stores on Kubernetes from a control-plane API and dashboard.
-It is being extended into a **WooCommerce hosting platform with a team MCP gateway**: admins register MCP servers once, and every team member uses all of them through **one MCP endpoint** (with a personal API key) and through a **chat agent** in the dashboard.
+A WooCommerce store runs on Kubernetes. Our own MCP server exposes its products and orders as tools. A **gateway** puts that server and the team's other MCP servers behind **one MCP endpoint** with per-user API keys and an audit log. A **chat agent** in the dashboard uses the same tools as the logged-in user.
 
-- Control plane API + (planned) MCP gateway + chat agent: `backend-node` (Node.js + Fastify)
-- Dashboard UI: `dashboard` (Vite + React)
-- Platform chart: `charts/platform`
-- WooCommerce MCP server: `mcp-servers/woo-mcp` (see [section 6.1](#61-how-woo-mcp-talks-to-the-store-and-why))
-- Store chart: `charts/store-woocommerce` (WordPress, MariaDB, init job, woo-mcp); (planned) upstream servers chart: `charts/mcp-upstreams`
-
-## Documentation map
+```text
+ Claude Code / Cursor / Inspector                 Browser
+      │ Bearer mcpgw_… (personal key)               │ dashboard.<domain>  (nginx: /api/* proxied)
+      ▼  api.<domain>/mcp                           ▼
+ ┌──────────────── platform namespace ────────────────────────────────┐
+ │ platform-api (Fastify): /mcp gateway · REST for the dashboard ·    │
+ │ chat agent · store provisioner.  Every tool call: GatewayCore      │
+ │ (policy, timeout, audit row) → the upstream's own credential       │
+ └──────┬──────────────────────────┬──────────────────────┬───────────┘
+        ▼                          ▼                      ▼
+ store-default: woo-mcp ─OAuth1─▶ WordPress ─▶ MariaDB    mcp-servers: notes-mcp, everything-mcp
+ store-<id> (bonus): the same, one namespace per store, registered as store_<id>
+```
 
 | Doc | Read it for |
 |---|---|
-| [ROADMAP.md](ROADMAP.md) | What is done `[x]`, partial `[~]`, not started `[ ]`. Includes the Definition-of-Done tracker |
-| [DESIGN.md](DESIGN.md) | Full design: research, architecture, MCP flow, data model, security, threat model, Helm local vs prod |
-| [SYSTEM.md](SYSTEM.md) | Invariants and hard-won lessons (e.g. exponential backoff, ingress webhook, MariaDB first boot, Bitnami images) |
-| [AGENTS.md](AGENTS.md) | Rules for anyone (or any AI agent) changing the repo |
-| [STORE_PLATFORM_FULL_GUIDE.md](STORE_PLATFORM_FULL_GUIDE.md) | Easy-language guide to the whole project, including the MCP gateway plan |
+| [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) | Short "system design and tradeoffs": aggregation, routing, failure handling, production changes |
+| [THREAT_MODEL.md](THREAT_MODEL.md) | Shared credentials, no token passthrough, untrusted upstreams, member vs member |
+| [DESIGN.md](DESIGN.md) | The full design: research, data model, MCP details, security, Helm |
+| [ROADMAP.md](ROADMAP.md) | What is done, with the proof for each item; definition-of-done tracker |
+| [SYSTEM.md](SYSTEM.md) | Invariants and lessons learned (each with symptom → cause → fix) |
+| [AGENTS.md](AGENTS.md) | Rules for anyone, human or AI agent, changing this repo |
 
-> The sections below describe the **current** store-provisioning platform. Setup for the MCP gateway (connecting Claude Code / Cursor, using the chat agent, VPS install) will be added here as the phases in ROADMAP.md are completed.
+## 1. Run it locally (Windows + minikube)
 
-## 1. Prerequisites
-
-- Docker Desktop (running)
-- Minikube
-- `kubectl`
-- `helm`
-- Node.js 20+
-- npm
-
-Quick version checks:
-
-```powershell
-minikube version
-kubectl version --client
-helm version
-node -v
-npm -v
-```
-
-## 2. One-time cluster start
-
-```powershell
-minikube start
-minikube addons enable ingress
-kubectl config current-context
-kubectl get ns
-```
-
-Expected context: `minikube`.
-
-## 3. Build and deploy platform
-
-Build API image into Minikube:
-
-```powershell
-minikube image build -t store-platform/api-node:dev backend-node
-```
-
-Install or upgrade chart:
-
-```powershell
-helm upgrade --install platform ./charts/platform -n platform --create-namespace -f ./charts/platform/values-local.yaml --set api.image=store-platform/api-node:dev
-```
-
-Verify:
-
-```powershell
-kubectl -n platform get pods
-kubectl -n platform get svc
-```
-
-API pod should be `Running` and ideally `1/1 Ready`.
-
-## 4. Run dashboard locally
-
-Terminal A (API port-forward):
-
-```powershell
-kubectl -n platform port-forward svc/platform-api 8080:80
-```
-
-Terminal B (dashboard dev server):
-
-```powershell
-npm --prefix dashboard install
-npm --prefix dashboard run dev -- --host 0.0.0.0 --port 5173
-```
-
-Open:
-
-- `http://127.0.0.1:5173`
-
-If you run in a remote IDE/codespace, forward both ports:
-
-- `5173` (dashboard)
-- `8080` (API)
-
-## 4.1 Local env for API features
-
-For local development, put backend secrets and overrides in the repo root `.env.local`.
-
-Example:
-
-```powershell
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_PRICE_ID=price_...
-STRIPE_PLAN_LABEL=Growth
-ADMIN_EMAILS=you@example.com
-```
-
-Then rerun either:
+Prerequisites: Docker Desktop, minikube, kubectl, helm, Node.js 20+ (24 is fine), Git Bash for the `scripts/*.sh`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\ops\up.ps1
 ```
 
-or:
+`up.ps1` starts minikube with Calico (so NetworkPolicies are enforced), builds all images inside minikube, installs the three Helm releases in order (`platform`, `store-default`, `upstreams`), and starts the port-forwards. A first run takes about 10 minutes.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\ops\resume.ps1
+| URL | What |
+|---|---|
+| `http://dashboard.127.0.0.1.nip.io:8088` | Dashboard |
+| `http://api.127.0.0.1.nip.io:8088/mcp` | Gateway MCP endpoint (Claude Code, Cursor, Inspector) |
+| `http://store.127.0.0.1.nip.io:8088` | Default WooCommerce store (`/wp-admin`, user `admin`) |
+| `http://store-<id>.127.0.0.1.nip.io:8088` | Stores created from the dashboard (bonus) |
+| `http://127.0.0.1:5173` | Vite dev server for dashboard work (same API through its `/api` proxy) |
+
+Later: `ops\resume.ps1` after a reboot or sleep (port-forwards die with their pod, SYSTEM.md L6), and `ops\down.ps1` to stop. It keeps all data; `-DestroyData` wipes it.
+
+Credentials for the LLM and admin tools go in the repo root `.env.local` (for example `GROQ_API_KEY=…`). `up.ps1`/`resume.ps1` copy them into the Secret `platform-api-env`. They never go into Helm values (SYSTEM.md L16).
+
+### Why these local domains
+
+- **nip.io** is public wildcard DNS: `anything.127.0.0.1.nip.io` resolves to `127.0.0.1`, so every Ingress host works without editing the hosts file.
+- **Port-forward 8088**, because with minikube's docker driver on Windows the node IP (`192.168.49.x`) can't be reached from the host (SYSTEM.md L5). One forward to the ingress controller serves every host.
+- The **port is part of every URL**, including WordPress's `home` option and invite links, so `values-local.yaml` sets `STORE_PUBLIC_PORT`, `DASHBOARD_PUBLIC_URL` and `GATEWAY_PUBLIC_URL` with `:8088`.
+- Offline, or behind DNS that blocks rebinding, nip.io fails (SYSTEM.md G12): add hosts-file entries for `*.local.test` names and change `baseDomain` in `values-local.yaml`.
+
+## 2. Use it
+
+1. **Sign up.** The first account becomes the admin. After that signup is closed, and people join through invite links (Members page → invite → send the link; it works once, for 7 days).
+2. **Servers.** Three upstreams are registered by Helm: `woo` (the store), `notes`, `everything`. Admins can add more (URL + optional credential, which is encrypted and never shown again), test, disable or delete them.
+3. **Connect a client.** On **API keys**, create a key (it is shown once). The dialog shows the ready command. The **Connect** page also has snippets for Cursor, Inspector and curl.
+
+   ```bash
+   claude mcp add --transport http team-gateway http://api.127.0.0.1.nip.io:8088/mcp --header "Authorization: Bearer mcpgw_…"
+   ```
+
+   In Claude Code, `/mcp` should show the gateway with 22 tools: `woo__*`, `notes__*`, `everything__*`. Try *"What orders came in today?"* or *"List today's orders and save a follow-up note for each customer"* (two upstreams in one prompt).
+4. **Chat.** The dashboard's Chat page runs the same tools as you: *"Create a product called Linen Shirt priced 499 rupees"*, then find it on the storefront. Every tool call is a card, and each one lands in **Audit** under your name.
+5. **Place an order.** On the storefront, add a product to the cart and check out with **Cash on delivery**. The order appears in `/wp-admin` → WooCommerce → Orders, and in *"what orders came in today?"*.
+6. **Stores (bonus).** Create a store from the Stores page. It gets its own namespace, database, WooCommerce, MCP server and URL, and once it is Ready its tools appear as `store_<id>__*`. Ask the chat to *"compare today's orders in Anku Shop and Bharat Bazaar"*. Deleting a store removes its tools first, then everything else.
+
+## 3. Verify it
+
+| Command | Proves |
+|---|---|
+| `bash scripts/dod.sh` | The whole definition of done, end to end (16 checks: order, member key sees every server, orders today, two upstreams, chat creates a product, disable/kill/revoke, audit). Needs an admin and a member login, see the script header |
+| `bash scripts/verify-store.sh [--persistence]` | Storefront → cart → COD checkout → order in WooCommerce; with `--persistence`, deletes the WordPress and MariaDB pods and checks the order survives |
+| `bash scripts/verify-store-isolation.sh` | 36 real connections against the NetworkPolicies, ingress and egress, positive and negative. `NS=store-<a> REL=wc-<a> OTHER_ID=<b>` checks a provisioned store and store-to-store isolation (43) |
+| `bash scripts/test-backend.sh` | All backend tests (87) in Node 20; `npm --prefix backend-node test` runs the non-SQLite ones on the host |
+| `npm --prefix mcp-servers/woo-mcp test`, `npm --prefix mcp-servers/notes-mcp test` | The MCP servers |
+| `npm --prefix dashboard run build` / `run lint` | The dashboard |
+
+## 4. Deploy to a VPS (k3s)
+
+```bash
+bash scripts/k3s-install.sh      # once: k3s (with Traefik) + helm
+# edit charts/*/values-prod.yaml: your domain (wildcard A record *.<domain> -> VPS IP), image tags
+bash scripts/deploy.sh           # checks values + Secrets, then installs the three charts with --atomic
 ```
 
-The scripts now read the root `.env.local` automatically and apply those values to the API deployment. Do not put `STRIPE_SECRET_KEY` in `dashboard/.env` or `dashboard/.env.local`.
+`deploy.sh` refuses to run while placeholder domains are left in the prod values, and prints the exact `kubectl create secret` command for every Secret that is still missing. Production never lets a chart generate credentials. Only the values files differ between local and production (SYSTEM_DESIGN.md has the table).
 
-## 5. CLI create/verify flow (for interview backup)
+**Upgrade and roll back.** `helm upgrade --install … --atomic` rolls a failed upgrade back by itself. By hand: `helm history <release> -n <ns>`, then `helm rollback <release> <revision> -n <ns>`. Database migrations are additive only, so an older API image still works against a newer database (SYSTEM.md I10).
 
-API health:
+## 5. How woo-mcp talks to the store, and why
 
-```powershell
-curl.exe -s http://127.0.0.1:8080/healthz
-```
-
-Create store:
-
-```powershell
-curl.exe -s -X POST http://127.0.0.1:8080/stores -H "content-type: application/json" -d "{\"engine\":\"woocommerce\"}"
-```
-
-List stores:
-
-```powershell
-curl.exe -s http://127.0.0.1:8080/stores
-```
-
-Events for one store:
-
-```powershell
-curl.exe -s http://127.0.0.1:8080/stores/<storeId>/events
-```
-
-Links:
-
-```powershell
-curl.exe -s http://127.0.0.1:8080/stores/<storeId>/links
-```
-
-Delete store:
-
-```powershell
-curl.exe -s -X DELETE http://127.0.0.1:8080/stores/<storeId>
-```
-
-## 6. What "Ready" means
-
-A store moves to `Ready` only after:
-
-1. Namespace + guardrails are applied.
-2. Secret is created.
-3. Helm install job succeeds.
-4. Workload availability gate passes.
-5. In-cluster WordPress service health check succeeds.
-
-Only then does URL get written in the store row and dashboard.
-
-Transient infrastructure errors (for example ingress webhook/controller hiccups or API timeouts) are retried automatically with backoff while the store remains in `Provisioning` (up to a retry cap), instead of failing immediately on first transient fault.
-
-## 6.1 How woo-mcp talks to the store, and why
-
-`woo-mcp` is our MCP server for one store. It has six tools: `list_products`, `create_product`, `list_orders`, `get_order`, `update_order_status` and `get_store_info`. It runs next to WordPress in the store namespace and speaks MCP over Streamable HTTP (stateless, JSON responses).
+`woo-mcp` is our MCP server for one store. Its six tools are `list_products`, `create_product`, `list_orders`, `get_order`, `update_order_status` and `get_store_info`. It runs next to WordPress in the store namespace and speaks MCP over Streamable HTTP (stateless, JSON responses).
 
 ```text
 gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed HTTP--> wordpress /wp-json/wc/v3
@@ -194,303 +109,57 @@ gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed H
 | WP-CLI (`wp wc …`) | no | Needs `pods/exec` RBAC (close to cluster-admin) or a shared volume. Starts PHP for every call (slow). Output parsing is brittle |
 | SQL on MariaDB | no | Skips WooCommerce logic, breaks with HPOS (orders moved out of `wp_posts`), and gives the MCP server full DB power |
 
-**Authentication.** Requests inside the cluster are plain HTTP, and WooCommerce refuses Basic auth without HTTPS. So woo-mcp signs every request with **OAuth 1.0a (HMAC-SHA256)** ([oauth1.ts](mcp-servers/woo-mcp/src/oauth1.ts)). WooCommerce checks the signature against the store's *public* URL, not the Service URL we call, so woo-mcp gets both: `WOO_BASE_URL` (where to send) and `WOO_HOME_URL` (what to sign) (SYSTEM.md L18). The consumer key and secret are generated once by Helm in Secret `<release>-credentials`. The init job inserts them into WooCommerce, and only woo-mcp mounts them.
+**Authentication.** Requests inside the cluster are plain HTTP, and WooCommerce refuses Basic auth without HTTPS. So woo-mcp signs every request with **OAuth 1.0a (HMAC-SHA256)** ([oauth1.ts](mcp-servers/woo-mcp/src/oauth1.ts)). WooCommerce checks the signature against the store's *public* URL, not the Service URL we call, so woo-mcp gets both: `WOO_BASE_URL` (where to send) and `WOO_HOME_URL` (what to sign) (SYSTEM.md L18). Helm generates the consumer key and secret once, in Secret `<release>-credentials`. The init job inserts them into WooCommerce, and only woo-mcp mounts them.
 
-**Who can call it.** Three layers. (1) The Service is ClusterIP and no Ingress routes to it. (2) A NetworkPolicy admits only `platform-api` pods from the `platform` namespace. (3) `/mcp` needs `Authorization: Bearer <mcp-token>`, from the same Secret. `bash scripts/verify-store-isolation.sh` proves (1) and (2) with real connections.
+**Who can call it.** There are three layers:
+1. The Service is ClusterIP, and no Ingress routes to it.
+2. A NetworkPolicy admits only `platform-api` pods from the `platform` namespace, and woo-mcp itself may only talk to its own WordPress.
+3. `/mcp` needs `Authorization: Bearer <mcp-token>`, from the same Secret.
+
+`verify-store-isolation.sh` proves the first two with real connections.
 
 **What it returns.** Trimmed objects (id, status, totals, customer name, line items), not the raw WooCommerce JSON, which is several KB per order. Every tool declares an `outputSchema`. `list_orders date="today"` uses the store's timezone (`Asia/Kolkata`), not UTC. A store error comes back as a readable tool error, for example `WooCommerce at http://… returned 404 woocommerce_rest_shop_order_invalid_id: Invalid ID.`
 
-Try it from your laptop:
+## 6. Bonus and stand-out items: what is implemented, and where
 
-```powershell
-kubectl -n store-default port-forward svc/store-default-woo-mcp 3001:80
-# token: kubectl -n store-default get secret store-default-credentials -o jsonpath="{.data.mcp-token}" (base64)
-npx @modelcontextprotocol/inspector@2.8.0 --cli http://localhost:3001/mcp --header "Authorization: Bearer <token>" --method tools/list
-```
+| Item | Status | Where |
+|---|---|---|
+| **Bonus: multi-store provisioning** | Done: create/delete from the dashboard, namespace per store with its own DB, Secrets, PVCs, Ingress, quota and limits, default-deny network; each store's own woo-mcp auto-registered as `store_<id>`; deletion removes the tools first; survives an API restart mid-install | `backend-node/src/provisioner.ts`, `gateway/storeServers.ts`, `charts/store-woocommerce` (baked into the `store-chart` image); DESIGN §11 |
+| Security hardening (#6) | SSRF guard, upstream credentials encrypted at rest (AES-256-GCM), default-deny NetworkPolicies in every namespace (ingress + egress), non-root everywhere, no token passthrough, pinning, narrow install role (rows below) | `gateway/ssrf.ts`, `gateway/crypto.ts`, `charts/*/templates/networkpolicy.yaml`; THREAT_MODEL.md |
+| Scaling (#7) | Stateless gateway (new MCP server per request, no sessions); per-key rate limit and per-upstream bulkhead. Multiple replicas need Postgres first | `gateway/mcpEndpoint.ts`, `gateway/upstreams.ts` |
+| Observability (#8) | Every failure names the server and the cause (API, dashboard, audit log); Prometheus metrics per server/tool/outcome, latency histogram, upstream up, on an in-cluster port (9464) | `gateway/metrics.ts`, `gateway/health.ts`, Servers page |
+| Upgrades and rollback (#9) | `--atomic` installs, rollback run live (revision 10 → back to 13), additive migrations | `scripts/deploy.sh`, section 4 |
+| VPS (#1, part) | Deploy script and Traefik prod values; not yet run on a real VPS | `scripts/deploy.sh`, `values-prod.yaml` |
+| Tool permissions (#2) | Destructive tools admin-only by default; hidden from `tools/list` and refused on `tools/call`; per-tool "Who may use it" on the Servers page | `gateway/policy.ts`, `routes.ts`, Servers page |
+| Many tools (#4) | `GATEWAY_TOOL_MODE=search\|auto`: `gateway__search_tools` (BM25) + `gateway__call_tool`; -94% tool tokens per chat turn | `gateway/toolSearch.ts` |
+| Tool-definition pinning (#6) | A changed tool is hidden until an admin approves it ("Approve changes") | `gateway/health.ts`, `catalog.ts`, Servers page |
+| Least-privilege installs (#6) | Store Helm jobs run non-root under a narrow `store-installer` role, not `admin` | `charts/platform/templates/api-rbac.yaml`, `kube.ts` |
+
+Not built yet: OAuth on the gateway (#3), hosted MCP servers (#5), multiple API replicas (needs Postgres, #7), a real VPS run with TLS (#1). ROADMAP.md tracks each one.
 
 ## 7. Troubleshooting
 
-### A) Dashboard says API unreachable
+| Symptom | Fix |
+|---|---|
+| Dashboard or `*.nip.io:8088` doesn't answer | The port-forwards died (sleep, pod restart): `ops\resume.ps1` (SYSTEM.md L6) |
+| A server shows Unreachable "timed out after 3000 ms" | Its pods are gone or not Ready: `kubectl -n <ns> get pods,endpoints`. With default-deny, a Service without pods times out instead of refusing (SYSTEM.md L30) |
+| Chat says `429 … tokens per minute` | Groq free tier (8 000 tokens/min); every turn sends all tool schemas. Wait a minute or use a paid key (SYSTEM.md L27) |
+| Store stuck in Provisioning | Store events (`GET /stores/<id>/events`, or the Stores page timeline), then `kubectl -n store-<id> get jobs,pods,events` and `kubectl -n store-<id> logs job/helm-install-<id>` |
+| `failed calling webhook "validate.nginx.ingress.kubernetes.io"` | Ingress controller still starting: `kubectl -n ingress-nginx rollout restart deploy ingress-nginx-controller`; provisioning retries by itself with backoff (SYSTEM.md L1, L2) |
+| New pods stuck in `ContainerCreating` (`calico … Unauthorized`) | `kubectl -n kube-system rollout restart ds/calico-node` (SYSTEM.md L26) |
+| `kubectl` shows `EOF` / TLS timeouts | `minikube stop` then `minikube start` (SYSTEM.md L7) |
 
-1. Confirm port-forward is running:
-```powershell
-kubectl -n platform port-forward svc/platform-api 8080:80
-```
-2. Confirm API:
-```powershell
-curl.exe -s http://127.0.0.1:8080/healthz
-```
-3. Confirm API pod:
-```powershell
-kubectl -n platform get pods -l app=platform-api -o wide
-kubectl -n platform logs deploy/platform-api --tail=100
-```
+## 8. Repository map
 
-### B) Store stuck in `Provisioning`
-
-Check events first:
-
-```powershell
-curl.exe -s http://127.0.0.1:8080/stores/<storeId>/events
-```
-
-Then inspect namespace resources:
-
-```powershell
-kubectl -n store-<storeId> get jobs,pods,svc,ingress
-```
-
-If Helm job is failing:
-
-```powershell
-kubectl -n store-<storeId> get pods -l job-name=helm-install-<storeId>
-kubectl -n store-<storeId> logs <helm-job-pod-name>
-```
-
-### C) Error contains ingress webhook connection refused
-
-Symptom from helm job logs:
-
-- `failed calling webhook "validate.nginx.ingress.kubernetes.io"... connect: connection refused`
-
-Fix:
-
-```powershell
-kubectl -n ingress-nginx get pods,svc
-kubectl -n ingress-nginx rollout restart deploy ingress-nginx-controller
-kubectl -n ingress-nginx get endpoints ingress-nginx-controller-admission
-```
-
-Retry store creation after ingress controller is healthy.
-
-### D) `kubectl` shows `EOF` / TLS timeout intermittently
-
-This is usually Minikube control-plane instability.
-
-```powershell
-minikube status
-minikube stop
-minikube start
-kubectl get ns
-```
-
-## 8. Teardown (bring down)
-
-Safe shutdown with data preserved:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\ops\down.ps1
-```
-
-This stops the local dashboard dev server, stops the API port-forward, and stops Minikube by default, but it preserves Helm releases, namespaces, PVCs, and cluster data.
-
-If you want to stop local processes but keep Minikube running:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\ops\down.ps1 -KeepMinikube
-```
-
-If you want full cleanup and are okay deleting cluster resources and likely their volumes:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\ops\down.ps1 -DestroyData
-```
-
-Manual cleanup flow:
-
-Uninstall platform:
-
-```powershell
-helm uninstall platform -n platform
-```
-
-Optional cleanup of store namespaces:
-
-```powershell
-kubectl get ns --no-headers | ForEach-Object { ($_ -split '\s+')[0] } | Where-Object { $_ -like 'store-*' } | ForEach-Object { kubectl delete ns $_ }
-```
-
-Stop Minikube:
-
-```powershell
-minikube stop
-```
-
-Full reset (optional):
-
-```powershell
-minikube delete
-```
-
-## 9. Interview demo sequence (suggested)
-
-1. Show `kubectl -n platform get pods`.
-2. Open dashboard (`127.0.0.1:5173`).
-3. Click create store.
-4. Open Activity panel and show lifecycle events.
-5. Show namespace isolation:
-```powershell
-kubectl get ns | findstr store-
-```
-6. Open resulting storefront/admin URL from the dashboard.
-7. Delete store and show namespace cleanup.
-
-## 10. API hardening envs
-
-- `MAX_STORES`: max active stores per client IP.
-- `TRUST_PROXY`: trust proxy headers.
-- `RATE_LIMIT_ENABLED`: global limiter on/off.
-- `RATE_LIMIT_CAPACITY` + `RATE_LIMIT_REFILL_PER_SEC`: global bucket.
-- `CREATE_RATE_LIMIT_CAPACITY` + `CREATE_RATE_LIMIT_REFILL_PER_SEC`: create endpoint limiter.
-- `CORS_ORIGINS`: comma-separated allowlist (`*` supported).
-- `ADMIN_API_KEY`: required for sensitive credential endpoints when set.
-
-Note: The orchestrator/API used by the platform is `backend-node` (Node.js). An early Python prototype (`backend/`) was removed; it is still in git history (for example `git show e2d8e56:backend/app/main.py`).
-
-## 11. Interview Study Plan (Full Project)
-
-Use this order so you understand both architecture and implementation details.
-
-1. Read architecture and runbook:
-   - `SYSTEM_DESIGN.md`
-   - `README.md` (this file)
-2. Understand backend API entrypoint and lifecycle:
-   - `backend-node/src/server.ts`
-   - `backend-node/src/provisioner.ts`
-   - `backend-node/src/kube.ts`
-3. Understand persistence and coordination:
-   - `backend-node/src/db.ts`
-   - `backend-node/src/lease.ts`
-   - `backend-node/src/leader.ts`
-4. Understand deployment config generation:
-   - `backend-node/src/engine.ts`
-   - `backend-node/src/secrets.ts`
-5. Understand infrastructure chart:
-   - `charts/platform/values*.yaml`
-   - `charts/platform/templates/*.yaml`
-6. Understand UI:
-   - `dashboard/src/App.tsx`
-   - `dashboard/src/App.css`
-   - `dashboard/vite.config.ts`
-7. Review helpers and demo scripts:
-   - `scripts/*.sh`
-   - `scripts/*.md`
-
-## 12. Runtime Flow (Code Map)
-
-Create store request path:
-
-1. `POST /stores` in `backend-node/src/server.ts`
-2. Row inserted in SQLite (`stores`) with `Provisioning`
-3. Reconciler loop in `backend-node/src/provisioner.ts` claims row via lease
-4. K8s guardrails applied via `backend-node/src/kube.ts`
-5. Secret generated/stored via `backend-node/src/secrets.ts`
-6. Helm install job launched (`alpine/helm`) via `applyHelmJob`
-7. Deployment availability + in-cluster HTTP checks
-8. Store row updated to `Ready` with URL + events written
-
-Delete store request path:
-
-1. `DELETE /stores/:id` marks `Deleting`
-2. Reconciler runs Helm uninstall job
-3. Namespace deletion and wait-for-gone
-4. Store row removed
-
-## 13. File-by-File Guide
-
-### Root files
-
-| File | What it does | Interview note |
-|---|---|---|
-| `README.md` | Runbook, operations, troubleshooting | Demonstrates production run/operate thinking |
-| `SYSTEM_DESIGN.md` | High-level architecture and guarantees | Use this when explaining tradeoffs |
-| `DESIGN.md` | Full MCP gateway design, research, threat model | Source for architecture answers |
-| `ROADMAP.md` | Phase-by-phase progress with `[ ]` / `[~]` / `[x]` | What is done vs planned |
-| `SYSTEM.md` | Invariants, lessons learned, gotchas | Debugging history (replaces the old `ForceDLT.txt` notes) |
-| `AGENTS.md` / `CLAUDE.md` | Rules for contributors and AI agents | Working agreement |
-
-### Node backend (`backend-node`)
-
-| File | What it does | Interview note |
-|---|---|---|
-| `backend-node/src/server.ts` | Fastify app, routes, env parsing, CORS, auth for sensitive endpoints, global/create rate limits | Main API entrypoint |
-| `backend-node/src/provisioner.ts` | Background reconcile loop for Provisioning/Deleting, retries, status transitions, readiness gates | Core orchestration brain |
-| `backend-node/src/kube.ts` | Kubernetes client factory + all K8s CRUD helpers + Helm Job templates + wait helpers | Infra abstraction layer |
-| `backend-node/src/db.ts` | SQLite schema/bootstrap and event insert helper | Source of truth for desired/observed state |
-| `backend-node/src/lease.ts` | Per-store lease columns and claim/release logic | Prevents concurrent workers from racing on same store |
-| `backend-node/src/leader.ts` | Leader lock table and leader lease | Single active reconciler semantics |
-| `backend-node/src/secrets.ts` | Password generation, K8s Secret upsert, local secret persistence table | Secret lifecycle handling |
-| `backend-node/src/engine.ts` | Engine-specific Helm values generation (WooCommerce implemented, Medusa stubbed) | Extensibility point for new engines |
-| `backend-node/src/namespace.ts` | Wait helper for namespace deletion completion | Cleanup reliability |
-| `backend-node/src/metrics.ts` | Aggregates event-based metrics and renders Prometheus text | Observability |
-| `backend-node/src/ratelimit.ts` | In-memory token-bucket limiter implementation | API hardening |
-| `backend-node/src/ai.ts` | Optional content-suggestion call to Groq/OpenAI-compatible endpoint with fallback | Non-critical enhancement path |
-| `backend-node/src/readiness.ts` | Generic deployment/ingress readiness helpers (legacy helper style) | Reference utility; main flow uses `kube.ts` waits |
-| `backend-node/src/better-sqlite3.d.ts` | TS module declaration shim | Build/type support |
-| `backend-node/package.json` | Node scripts and dependencies | Shows runtime stack |
-| `backend-node/tsconfig.json` | TypeScript compiler config | Strictness and output layout |
-| `backend-node/Dockerfile` | Build + runtime container image for API (non-root, `/data` mount) | Container hardening choices |
-
-### Dashboard (`dashboard`)
-
-| File | What it does | Interview note |
-|---|---|---|
-| `dashboard/src/App.tsx` | Full UI logic: polling, API fallback candidates, create/delete flows, status/event views, error banners | Primary frontend behavior |
-| `dashboard/src/App.css` | Main visual system and component styles | Demonstrates UI/UX polish |
-| `dashboard/src/index.css` | Global styles and font setup | App-wide visual baseline |
-| `dashboard/src/main.tsx` | React mount/bootstrap | Standard Vite entrypoint |
-| `dashboard/vite.config.ts` | Dev proxy (`/api` -> target API) and Vite config | Local dev connectivity |
-| `dashboard/package.json` | Frontend scripts and dependencies | Toolchain overview |
-| `dashboard/index.html` | Vite HTML shell | Static bootstrap |
-| `dashboard/Dockerfile` | Multi-stage build: Vite build -> Nginx static serve | Production frontend container |
-| `dashboard/README.md` | Dashboard-specific connectivity notes | Useful for local debug |
-| `dashboard/eslint.config.js` | Linting config | Code quality setup |
-| `dashboard/tsconfig*.json` | TS configs for app/node builds | Build typing details |
-| `dashboard/public/vite.svg`, `dashboard/src/assets/react.svg` | Static assets | Non-critical |
-
-### Helm platform chart (`charts/platform`)
-
-| File | What it does | Interview note |
-|---|---|---|
-| `charts/platform/Chart.yaml` | Chart metadata | Helm packaging basics |
-| `charts/platform/values.yaml` | Default values for API/dashboard/global | Base deployment profile |
-| `charts/platform/values-local.yaml` | Minikube/local overrides | Local reproducibility |
-| `charts/platform/values-prod.yaml` | Production-oriented overrides | Environment separation |
-| `charts/platform/templates/_helpers.tpl` | Naming helpers | Templating conventions |
-| `charts/platform/templates/api-deployment.yaml` | API deployment and PVC | Runtime pod config and persistence |
-| `charts/platform/templates/api-service.yaml` | API service (80 -> 8000) | In-cluster access |
-| `charts/platform/templates/api-ingress.yaml` | Host-based API ingress | External exposure |
-| `charts/platform/templates/api-rbac.yaml` | ServiceAccount + ClusterRole + ClusterRoleBinding for orchestration privileges | Critical permissions model |
-| `charts/platform/templates/dashboard-deployment.yaml` | Dashboard deployment | Optional in-cluster UI |
-| `charts/platform/templates/dashboard-service.yaml` | Dashboard service | In-cluster exposure |
-| `charts/platform/templates/dashboard-ingress.yaml` | Dashboard ingress | Host routing for UI |
-
-### Store engine chart (`charts/store-woocommerce`)
-
-| File | What it does | Interview note |
-|---|---|---|
-| `charts/store-woocommerce/Chart.yaml` | Placeholder chart metadata | Historical stub |
-| `charts/store-woocommerce/values.yaml` | Minimal ingress values | Current runtime actually uses Bitnami chart via Helm job |
-
-### Scripts and operations helpers (`scripts`)
-
-| File | What it does | Interview note |
-|---|---|---|
-| `scripts/demo.sh` | Simple demo flow (health/create/events) | Quick smoke in shell |
-| `scripts/smoke.sh` | More complete create/wait/credentials/delete smoke | CI-like local validation helper |
-| `scripts/video-run.sh` | Guided command sequence for recording/demo | Presentation automation |
-| `scripts/video-commands.sh` | Companion commands for recorded walkthrough | Demo support |
-| `scripts/demo.md` | Narrative demo checklist | Interview flow prep |
-| `scripts/order-checklist.md` | WooCommerce order verification checklist | Functional validation |
-| `scripts/k3s-install.sh` | K3s + ingress bootstrap helper | Alternative environment setup |
-
-## 14. What to Be Ready to Explain in Interview
-
-1. Why desired-state + reconciler is used instead of synchronous request-only provisioning.
-2. Why per-store namespace isolation is combined with quota/limit/network policy.
-3. Why leases and leader election are both present.
-4. Why store creation is asynchronous and event-driven.
-5. Why retries/backoff exist and how transient infra errors are handled.
-6. Why Helm is run inside Kubernetes Jobs (and tradeoffs vs direct SDK-only deploys).
-7. How RBAC is scoped and why `bind` on `admin` was needed for per-namespace rolebinding.
-8. How UI handles API-base fallback and partial outages gracefully.
+| Path | What |
+|---|---|
+| `backend-node/src/gateway/` | The gateway: `core.ts` (the only path to upstreams), `catalog.ts`, `upstreams.ts`, `health.ts`, `policy.ts`, `audit.ts`, `keys.ts`, `registry.ts`, `crypto.ts`, `ssrf.ts`, `mcpEndpoint.ts`, `routes.ts`, `seed.ts`, `storeServers.ts` |
+| `backend-node/src/chat/` | Chat agent: OpenAI-compatible client, tool loop, SSE route |
+| `backend-node/src/team/` | Members, invites, roles |
+| `backend-node/src/provisioner.ts`, `kube.ts`, `engine.ts`, `lease.ts`, `leader.ts` | Store provisioning (bonus): reconciler, Kubernetes helpers, per-store values, leases |
+| `backend-node/src/server.ts`, `auth.ts`, `db.ts` | Fastify app, sessions/passwords, SQLite schema and migrations |
+| `mcp-servers/woo-mcp`, `notes-mcp`, `everything-mcp` | The upstream MCP servers |
+| `dashboard/src/` | React app: `App.tsx` (auth + navigation), `pages/*` (one per page), `lib/*` |
+| `charts/platform`, `charts/store-woocommerce`, `charts/mcp-upstreams` | The three Helm charts; `values-local.yaml` / `values-prod.yaml` hold every environment difference |
+| `ops/*.ps1` | Local up / resume / down (Windows) |
+| `scripts/` | `dod.sh`, `verify-store.sh`, `verify-store-isolation.sh`, `test-backend.sh`, `deploy.sh`, `k3s-install.sh`, demo helpers |
