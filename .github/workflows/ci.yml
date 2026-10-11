@@ -1,0 +1,136 @@
+# CI: the same checks AGENTS.md Rule 5 asks for before anything is marked done, on every push and
+# pull request. Images are built to prove every Dockerfile works, but not pushed (no registry
+# credentials in CI yet; production images are tagged by hand, see values-prod.yaml).
+name: CI
+
+on:
+  push:
+    branches: [main, mcp-gateway]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (typecheck + tests)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend-node/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      # On Linux + Node 20 better-sqlite3 loads, so the SQLite suites run too (SYSTEM.md L13).
+      - run: npm test
+
+  mcp-servers:
+    name: MCP servers
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: mcp-servers/woo-mcp
+            node: "20"
+          # notes-mcp uses the built-in node:sqlite module (Node >= 22.13).
+          - dir: mcp-servers/notes-mcp
+            node: "22"
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+  dashboard:
+    name: Dashboard (lint + build)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  helm:
+    name: Helm (lint + template, local and prod)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+      - name: Lint and render every chart with both environments' values
+        run: |
+          set -euo pipefail
+          for chart in platform store-woocommerce mcp-upstreams; do
+            for env in local prod; do
+              echo "::group::$chart ($env)"
+              helm lint "charts/$chart" -f "charts/$chart/values.yaml" -f "charts/$chart/values-$env.yaml"
+              helm template ci "charts/$chart" -n ci -f "charts/$chart/values.yaml" -f "charts/$chart/values-$env.yaml" > /dev/null
+              echo "::endgroup::"
+            done
+          done
+
+  scripts:
+    name: Shell scripts (syntax)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Scripts run in Linux containers and on the VPS; a CRLF line ending breaks them (SYSTEM.md G10).
+      - name: bash -n and no CRLF
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh; do
+            bash -n "$f"
+            if grep -q $'\r' "$f"; then echo "$f has CRLF line endings"; exit 1; fi
+          done
+
+  images:
+    name: Image build (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    needs: [backend, mcp-servers, dashboard, helm]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api-node
+            context: backend-node
+          - name: dashboard
+            context: dashboard
+          - name: woo-mcp
+            context: mcp-servers/woo-mcp
+          - name: notes-mcp
+            context: mcp-servers/notes-mcp
+          - name: everything-mcp
+            context: mcp-servers/everything-mcp
+          - name: store-chart
+            context: charts/store-woocommerce
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t "store-platform/${{ matrix.name }}:ci" "${{ matrix.context }}"
