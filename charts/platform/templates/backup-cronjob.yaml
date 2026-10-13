@@ -1,0 +1,97 @@
+{{- if and .Values.backup.enabled .Values.api.persistence.enabled }}
+# Nightly backup of the platform database (users, keys, servers, audit log) to the backup store
+# (DESIGN §13.6). better-sqlite3's online backup gives a consistent copy while the API keeps
+# writing; it runs with the API's own image, so no extra tool is needed. Same weekday naming as
+# the store backups (Mon..Sun + latest).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "platform.apiName" . }}-backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  {{- with .Values.backup.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: {{ include "platform.apiName" . }}-backup
+            # Lets the backup store's NetworkPolicy admit this pod (charts/backups).
+            store-platform/backup-client: "true"
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: dump
+              image: {{ .Values.api.image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["node", "-e"]
+              args:
+                - >-
+                  const Database = require("better-sqlite3");
+                  const src = new Database(process.env.DB_PATH, { readonly: true, fileMustExist: true });
+                  src.backup("/backup/platform.db").then(() => { src.close(); console.log("backup written"); })
+                  .catch((e) => { console.error("Platform backup: " + e.message); process.exit(1); });
+              env:
+                - name: DB_PATH
+                  value: {{ .Values.api.env.DB_PATH | quote }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits: { memory: 256Mi }
+              volumeMounts:
+                - { name: data, mountPath: /data, readOnly: true }
+                - { name: backup, mountPath: /backup }
+          containers:
+            - name: upload
+              image: {{ .Values.backup.curlImage | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  gzip -c /backup/platform.db > /tmp/platform.db.gz
+                  for name in $(date +%a) latest; do
+                    curl -fsS --aws-sigv4 "aws:amz:$S3_REGION:s3" --user "$S3_KEY_ID:$S3_SECRET" \
+                      -T /tmp/platform.db.gz "$S3_ENDPOINT/$S3_BUCKET/platform/$name.db.gz"
+                    echo "uploaded platform/$name.db.gz"
+                  done
+              env:
+                - { name: S3_ENDPOINT, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: endpoint } } }
+                - { name: S3_BUCKET, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: bucket } } }
+                - { name: S3_REGION, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: region } } }
+                - { name: S3_KEY_ID, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: access-key-id } } }
+                - { name: S3_SECRET, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: secret-access-key } } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts:
+                - { name: backup, mountPath: /backup, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ include "platform.apiName" . }}-pvc
+            - name: backup
+              emptyDir: { sizeLimit: 1Gi }
+            - name: tmp
+              emptyDir: { sizeLimit: 1Gi }
+{{- end }}

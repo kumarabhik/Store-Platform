@@ -1,0 +1,11 @@
+# The gateway dashboard, kept as JSON in the repo (dashboards/gateway.json). Grafana's sidecar loads
+# every ConfigMap with this label, so editing the JSON and upgrading the release updates it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-mcp-gateway
+  labels:
+    grafana_dashboard: "1"
+data:
+  mcp-gateway.json: |-
+{{ .Files.Get "dashboards/gateway.json" | indent 4 }}

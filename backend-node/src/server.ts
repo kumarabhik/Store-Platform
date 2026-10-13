@@ -45,6 +45,7 @@ import { registerTeamRoutes } from "./team/routes";
 import { createLlm, llmConfigFromEnv } from "./chat/llm";
 import { registerChatRoutes } from "./chat/routes";
 import { createApprovals, parseApprovalMode } from "./chat/approval";
+import { createGarageAdmin } from "./backupStore";
 
 // PublicUser carries the stored role (users.role); see team/members.ts for how it is assigned.
 type CurrentUser = PublicUser;
@@ -126,6 +127,12 @@ function extractSessionToken(req: FastifyRequest) {
   return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
 }
 
+// "backups/backups-credentials" -> { namespace, name }; anything else -> null.
+function parseSecretRef(raw: string | undefined): { namespace: string; name: string } | null {
+  const m = /^([a-z0-9-]+)\/([a-z0-9.-]+)$/.exec((raw ?? "").trim());
+  return m ? { namespace: m[1], name: m[2] } : null;
+}
+
 async function main() {
   const DB_PATH = process.env.DB_PATH ?? "./platform.db";
   const BASE_DOMAIN = process.env.BASE_DOMAIN ?? "127.0.0.1.nip.io";
@@ -186,6 +193,9 @@ async function main() {
     ]),
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    // The dashboard is another origin; without this the browser hides the audit CSV's file name
+    // and row count from it.
+    exposedHeaders: ["Content-Disposition", "X-Audit-Rows", "X-Audit-Truncated"],
     credentials: false,
   });
 
@@ -457,6 +467,28 @@ async function main() {
     app.log,
   );
 
+  // Per-store backup keys and buckets on the backup store (DESIGN §13.6). The admin token is read from
+  // the backup store's Secret when needed, never kept in env; no Secret = no backups for new stores.
+  const backupSource = parseSecretRef(process.env.BACKUP_SOURCE_SECRET);
+  const backupAdmin = async () => {
+    if (!backupSource) return null;
+    const token = await readSecret(backupSource.namespace, backupSource.name, "admin-token").catch(() => null);
+    return token ? createGarageAdmin({ baseUrl: `http://garage.${backupSource.namespace}.svc.cluster.local:3903/v1`, token }) : null;
+  };
+  const storeBackups = backupSource
+    ? {
+        async ensure(storeId: string) {
+          const admin = await backupAdmin();
+          if (!admin) return null;
+          const key = await admin.ensureStoreKey(storeId);
+          return { endpoint: `http://garage.${backupSource.namespace}.svc.cluster.local:3900`, region: "garage", ...key };
+        },
+        async revoke(storeId: string) {
+          await (await backupAdmin())?.revokeStoreKey(storeId);
+        },
+      }
+    : null;
+
   // Store provisioning (bonus, DESIGN §11). Started after the gateway, because a Ready store
   // registers its own MCP server and a deleted one removes it first.
   const storeServerDeps = { db, registry, health, pool: upstreamPool, readSecret };
@@ -470,6 +502,7 @@ async function main() {
       chartEnv: STORE_CHART_ENV,
       apiServer: KUBE_API_ENDPOINTS,
       installerRole: process.env.STORE_INSTALLER_ROLE?.trim() || "platform-store-installer",
+      backup: storeBackups,
       storePublicScheme: STORE_PUBLIC_SCHEME,
       storePublicPort: STORE_PUBLIC_PORT,
     },

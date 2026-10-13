@@ -1,0 +1,11 @@
+apiVersion: v2
+name: monitoring
+description: Prometheus, Alertmanager and Grafana for the MCP gateway (DESIGN §13.5), plus our scrape config, alert rules and dashboard
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  # Pinned; `helm dependency build charts/monitoring` downloads it into charts/ (git-ignored).
+  - name: kube-prometheus-stack
+    version: 92.2.0
+    repository: https://prometheus-community.github.io/helm-charts

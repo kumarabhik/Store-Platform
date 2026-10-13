@@ -63,17 +63,21 @@ async function connect(woo: WooClient): Promise<Client> {
 }
 
 describe("woo-mcp tools", () => {
-  it("lists all six tools with input and output schemas and annotations", async () => {
+  it("lists all nine tools with input and output schemas and annotations", async () => {
     const c = await connect(fakeWoo(() => []).woo);
     const { tools } = await c.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(
-      ["create_product", "get_order", "get_store_info", "list_orders", "list_products", "update_order_status"],
-    );
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      "create_product", "create_refund", "get_order", "get_store_info", "list_low_stock",
+      "list_orders", "list_products", "sales_summary", "update_order_status",
+    ]);
     for (const t of tools) {
       expect(t.outputSchema?.type).toBe("object");
       expect(t.annotations).toBeDefined();
     }
     expect(tools.find((t) => t.name === "update_order_status")?.annotations?.destructiveHint).toBe(true);
+    // The gateway makes destructive tools admin-only and asks before them in the chat (S2, P10).
+    expect(tools.find((t) => t.name === "create_refund")?.annotations).toMatchObject({ destructiveHint: true, idempotentHint: false });
+    for (const name of ["sales_summary", "list_low_stock"]) expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).toBe(true);
   });
 
   it("list_products passes filters and trims the output", async () => {
@@ -152,5 +156,58 @@ describe("woo-mcp tools", () => {
     const res = await c.callTool({ name: "get_order", arguments: { order_id: 999 } });
     expect(res.isError).toBe(true);
     expect(JSON.stringify(res.content)).toContain("woocommerce_rest_shop_order_invalid_id");
+  });
+
+  it("sales_summary adds up sales in cents for an inclusive date range, by status, with top products", async () => {
+    const order = (id: number, status: string, total: string, items: [string, number, string][]) => ({
+      ...wcOrder, id, number: String(id), status, total, line_items: items.map(([name, quantity, t]) => ({ name, quantity, total: t })),
+    });
+    const { woo, calls } = fakeWoo(() => [
+      order(1, "processing", "199.10", [["Ceramic Mug", 1, "199.10"]]),
+      order(2, "completed", "0.20", [["Sticker", 2, "0.20"]]),
+      order(3, "on-hold", "499.00", [["Linen Shirt", 1, "499.00"]]),
+    ]);
+    const c = await connect(woo);
+    const res = await c.callTool({ name: "sales_summary", arguments: { from: "2026-10-01", to: "2026-10-07" } });
+    expect(calls[0].query).toMatchObject({ status: "processing,completed,on-hold", after: "2026-09-30T23:59:59", before: "2026-10-08T00:00:00", per_page: "100" });
+    expect(res.structuredContent).toMatchObject({
+      from: "2026-10-01", to: "2026-10-07", timezone: "Asia/Kolkata", currency: "INR",
+      orders: 3, revenue: "698.30", average_order: "232.77", truncated: false,
+      by_status: { processing: 1, completed: 1, "on-hold": 1 },
+    });
+    expect((res.structuredContent as { top_products: { name: string }[] }).top_products.map((p) => p.name)).toEqual(["Linen Shirt", "Ceramic Mug", "Sticker"]);
+
+    const bad = await c.callTool({ name: "sales_summary", arguments: { from: "2026-10-07", to: "2026-10-01" } });
+    expect(bad.isError).toBe(true);
+  });
+
+  it("sales_summary stops after 10 pages and says it was truncated", async () => {
+    const page = Array.from({ length: 100 }, (_, i) => ({ ...wcOrder, id: i, total: "1.00" }));
+    const { woo, calls } = fakeWoo(() => page);
+    const res = await (await connect(woo)).callTool({ name: "sales_summary", arguments: {} });
+    expect(calls).toHaveLength(10);
+    expect(res.structuredContent).toMatchObject({ orders: 1000, revenue: "1000.00", truncated: true });
+  });
+
+  it("list_low_stock returns out-of-stock and at-or-below-threshold products, lowest first", async () => {
+    const p = (id: number, stock_quantity: number | null, stock_status = "instock") => ({ ...wcProduct, id, name: `P${id}`, stock_quantity, stock_status });
+    const { woo } = fakeWoo(() => [p(1, 10), p(2, 3), p(3, null), p(4, 0, "outofstock"), p(5, 5)]);
+    const res = await (await connect(woo)).callTool({ name: "list_low_stock", arguments: {} });
+    const out = res.structuredContent as { threshold: number; products: { id: number }[] };
+    expect(out.threshold).toBe(5);
+    expect(out.products.map((x) => x.id)).toEqual([4, 2, 5]);
+  });
+
+  it("create_refund records the refund without a payment gateway call and returns the updated order", async () => {
+    const { woo, calls } = fakeWoo((call) =>
+      call.method === "POST" ? { id: 90, amount: "199.00", reason: "Damaged", date_created: "2026-10-11T10:00:00" } : { ...wcOrder, status: "refunded" },
+    );
+    const c = await connect(woo);
+    const res = await c.callTool({ name: "create_refund", arguments: { order_id: 42, amount: "199", reason: "Damaged" } });
+    expect(calls[0]).toEqual({ method: "POST", path: "/orders/42/refunds", body: { amount: "199", reason: "Damaged", api_refund: false } });
+    expect(res.structuredContent).toMatchObject({ refund: { id: 90, amount: "199.00" }, order: { id: 42, status: "refunded" } });
+
+    const bad = await c.callTool({ name: "create_refund", arguments: { order_id: 42, amount: "1,99", reason: "x" } });
+    expect(bad.isError).toBe(true);
   });
 });

@@ -41,3 +41,7 @@ dashboard:
   enabled: true
   # Built by ops/up.ps1 with `minikube image build`; same :dev tag, so up.ps1 restarts it (SYSTEM.md L12).
   image: "store-platform/dashboard:dev"
+
+# Backed up nightly to charts/backups (ops/up.ps1 installs it and copies the upload Secret).
+backup:
+  enabled: true

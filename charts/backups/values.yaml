@@ -1,0 +1,32 @@
+# Backup store: one Garage node (S3-compatible, https://garagehq.deuxfleurs.fr) in namespace
+# "backups". Store and platform CronJobs upload their nightly dumps to bucket `bucket` (DESIGN §13.6).
+# MinIO was the first choice, but it no longer publishes images (SYSTEM.md L40).
+
+image: dxflrs/garage:v1.3.0
+# Tiny helper images: curl (S3 uploads, admin API calls) and busybox (volume ownership).
+curlImage: curlimages/curl:8.11.1
+busyboxImage: busybox:1.36
+pullPolicy: IfNotPresent
+
+bucket: backups
+# Region name clients sign S3 requests with (Garage checks it).
+region: garage
+
+storage:
+  size: 5Gi
+  storageClassName: ""
+
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits: { memory: 256Mi }
+
+# Name of an existing Secret with keys rpc-secret, admin-token, access-key-id, secret-access-key.
+# Empty: generated once and kept (lookup + keep), like the other charts' credentials.
+existingSecret: ""
+
+networkPolicy:
+  enabled: true
+  # The gateway/provisioner pods: the only ones besides the bootstrap job allowed on the admin API.
+  platformNamespace: platform
+  platformApiPodLabels:
+    app: platform-api

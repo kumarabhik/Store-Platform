@@ -1,0 +1,75 @@
+# One-time setup through Garage's admin API (v1): assign the node's storage layout, create the bucket,
+# import the upload key and let it write to the bucket. Every step checks first, so the hook is safe
+# to run on every install/upgrade. Garage's own image has no shell, hence the curl image.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: garage-bootstrap
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "backups.selectorLabels" (dict "ctx" . "component" "bootstrap") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          image: {{ .Values.curlImage }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          env:
+            - { name: BUCKET, value: {{ .Values.bucket | quote }} }
+            - name: ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "backups.secretName" . }}, key: admin-token } }
+            - name: KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ include "backups.secretName" . }}, key: access-key-id } }
+            - name: KEY_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "backups.secretName" . }}, key: secret-access-key } }
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              A=http://garage:3903/v1
+              api() { curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" "$@"; }
+              # Wait for the admin API, backing off (SYSTEM.md I12).
+              d=2; until api -f -o /dev/null "$A/status"; do echo "waiting for garage ($d s)"; sleep $d; d=$((d < 30 ? d * 2 : 30)); done
+
+              # Garage pretty-prints its JSON ("key": "value"), hence the optional spaces below.
+              status=$(api "$A/status")
+              node=$(echo "$status" | grep -o '"node": *"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+              if echo "$status" | grep -q '"zone"'; then
+                echo "layout: already assigned"
+              else
+                echo "layout: assigning node $node"
+                api -f -X POST "$A/layout" -d "[{\"id\":\"$node\",\"zone\":\"dc1\",\"capacity\":{{ include "backups.capacityBytes" . }},\"tags\":[]}]" > /dev/null
+                version=$(api "$A/layout" | grep -o '"version": *[0-9]*' | head -1 | cut -d: -f2)
+                api -f -X POST "$A/layout/apply" -d "{\"version\":$((version + 1))}" > /dev/null
+              fi
+
+              if api -f -o /dev/null "$A/key?id=$KEY_ID" 2>/dev/null; then echo "key: exists"
+              else echo "key: importing"; api -f -X POST "$A/key/import" -d "{\"accessKeyId\":\"$KEY_ID\",\"secretAccessKey\":\"$KEY_SECRET\",\"name\":\"backups\"}" > /dev/null; fi
+
+              if ! api -f -o /dev/null "$A/bucket?globalAlias=$BUCKET" 2>/dev/null; then
+                echo "bucket: creating $BUCKET"; api -f -X POST "$A/bucket" -d "{\"globalAlias\":\"$BUCKET\"}" > /dev/null
+              fi
+              bucket=$(api -f "$A/bucket?globalAlias=$BUCKET" | grep -o '"id": *"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+              api -f -X POST "$A/bucket/allow" -d "{\"bucketId\":\"$bucket\",\"accessKeyId\":\"$KEY_ID\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":false}}" > /dev/null
+              echo "ready: bucket $BUCKET writable with key $KEY_ID"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { memory: 64Mi }

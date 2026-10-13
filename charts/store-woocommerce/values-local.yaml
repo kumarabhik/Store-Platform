@@ -17,3 +17,7 @@ wooMcp:
 
 networkPolicy:
   ingressControllerNamespace: ingress-nginx
+
+# The default store is backed up nightly (charts/backups must be installed; ops/up.ps1 does both).
+backup:
+  enabled: true

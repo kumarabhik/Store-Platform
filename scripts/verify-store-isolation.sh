@@ -21,30 +21,69 @@ report() {  # report <from> <target> <got> <expect>
   fi
 }
 
+# Every probe prints OPEN or CLOSED from inside the cluster. Anything else (the probe pod couldn't
+# start, exec failed) is reported as "error" and fails the check: a probe that never ran must not
+# pass as "blocked".
+#
+# k3s enforces NetworkPolicies with kube-router, which applies rules asynchronously: a new pod gets
+# its rules a moment after it starts, and every pod this script creates makes it rebuild its rule
+# sets (SYSTEM.md L44). So probe pods wait 3 s; when expecting "open" they try up to 5 times; and a
+# check that doesn't match is repeated twice, 2 s apart. When expecting "blocked", any successful
+# connection counts as open, so a leak is never hidden. Calico (minikube) passes on the first try.
+
+# The shell command a probe runs. $1 host, $2 port, $3 expect, $4 how to connect once.
+check_cmd() {
+  local once=$4
+  if [ "$3" = open ]; then
+    echo "sleep 3; for i in 1 2 3 4 5; do if $once; then echo OPEN; exit 0; fi; sleep 2; done; echo CLOSED"
+  else
+    echo "sleep 3; if $once; then echo OPEN; exit 0; fi; sleep 2; if $once; then echo OPEN; else echo CLOSED; fi"
+  fi
+}
+
+attempt() {  # attempt <expect> <command...>  -> prints open|blocked|error
+  local expect=$1 got out
+  shift
+  for i in 1 2 3; do
+    out=$("$@" 2>/dev/null)
+    case "$out" in
+      *OPEN*) got=open ;;
+      *CLOSED*) got=blocked ;;
+      *) got=error ;;
+    esac
+    [ "$got" = "$expect" ] && break
+    [ "$i" -lt 3 ] && sleep 2
+  done
+  echo "$got"
+}
+
 probe() {  # probe <from-namespace> <target host:port> <expect: open|blocked>  (throwaway busybox pod)
-  local from=$1 target=$2 expect=$3 got=blocked
-  kubectl -n "$from" run "np-probe-$RANDOM" --rm -i --restart=Never --quiet \
-    --image=busybox:1.36 --labels=app=np-probe -- nc -z -w 3 "${target%:*}" "${target##*:}" >/dev/null 2>&1 && got=open
+  local from=$1 target=$2 expect=$3 got h=${2%:*} p=${2##*:}
+  got=$(attempt "$expect" kubectl -n "$from" run "np-probe-$RANDOM" --rm -i --restart=Never --quiet \
+    --image=busybox:1.36 --labels=app=np-probe -- sh -c "$(check_cmd "$h" "$p" "$expect" "nc -z -w 2 $h $p")")
   report "$from" "$target" "$got" "$expect"
 }
 
 # From inside an existing workload (egress checks). Uses nc, or bash /dev/tcp where the image
 # has no nc (WordPress).
 probe_from() {  # probe_from <namespace> <workload> <host:port> <expect>
-  local ns=$1 wl=$2 target=$3 expect=$4 got=blocked host=${3%:*} port=${3##*:}
-  kubectl -n "$ns" exec "$wl" -- sh -c     "if command -v nc >/dev/null; then nc -z -w 3 $host $port; else timeout 3 bash -c '</dev/tcp/$host/$port'; fi"     >/dev/null 2>&1 && got=open
+  local ns=$1 wl=$2 target=$3 expect=$4 got h=${3%:*} p=${3##*:}
+  local once="{ if command -v nc >/dev/null; then nc -z -w 3 $h $p; else timeout 3 bash -c '</dev/tcp/$h/$p'; fi; }"
+  got=$(attempt "$expect" kubectl -n "$ns" exec "$wl" -- sh -c "$(check_cmd "$h" "$p" "$expect" "$once" | sed 's/^sleep 3; //')")
   report "${wl#*/}" "$target" "$got" "$expect"
 }
 
 # From the real platform-api pod. A throwaway pod with its labels would also join the
 # platform-api Service and receive live API traffic, so exec into the existing pod instead.
 probe_gateway() {  # probe_gateway <target host:port> <expect>
-  local target=$1 expect=$2 got=blocked
-  kubectl -n platform exec deploy/platform-api -- nc -z -w 3 "${target%:*}" "${target##*:}" >/dev/null 2>&1 && got=open
+  local target=$1 expect=$2 got h=${1%:*} p=${1##*:}
+  got=$(attempt "$expect" kubectl -n platform exec deploy/platform-api -- sh -c "$(check_cmd "$h" "$p" "$expect" "nc -z -w 3 $h $p" | sed 's/^sleep 3; //')")
   report "platform-api" "$target" "$got" "$expect"
 }
 
-kubectl create namespace np-other --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# A leftover np-other from the previous run may still be terminating; pods can't start there.
+kubectl delete namespace np-other --ignore-not-found --wait=true >/dev/null
+kubectl create namespace np-other >/dev/null
 
 probe np-other   "$WP" blocked   # another tenant cannot reach this store's WordPress
 probe np-other   "$DB" blocked   # ...or its database
@@ -106,6 +145,20 @@ probe_from mcp-servers deploy/notes-mcp "$PUBLIC" blocked     # upstreams can't 
 probe_from mcp-servers deploy/notes-mcp "$WP_IP" blocked
 probe_from mcp-servers deploy/notes-mcp "$API_IP" blocked
 probe_from mcp-servers deploy/everything-mcp "$PUBLIC" blocked
+
+# Backup store (DESIGN §13.6): only pods labelled as backup clients reach S3, nobody but the
+# bootstrap job reaches the admin API.
+if kubectl get namespace backups >/dev/null 2>&1; then
+  probe_labelled() {  # probe_labelled <namespace> <labels> <host:port> <expect>
+    local got h=${3%:*} p=${3##*:}
+    got=$(attempt "$4" kubectl -n "$1" run "np-probe-$RANDOM" --rm -i --restart=Never --quiet --image=busybox:1.36 --labels="$2" --       sh -c "$(check_cmd "$h" "$p" "$4" "nc -z -w 2 $h $p")")
+    report "$1 ($2)" "$3" "$got" "$4"
+  }
+  GARAGE="garage.backups.svc.cluster.local"
+  probe np-other "$GARAGE:3900" blocked
+  probe_labelled np-other "store-platform/backup-client=true" "$GARAGE:3900" open
+  probe_labelled np-other "store-platform/backup-client=true" "$GARAGE:3903" blocked
+fi
 
 # Between provisioned stores (bonus, DESIGN §11): set OTHER_ID to a second store's id. Store A's
 # pods must not reach store B at all, and B's own MCP server is still reachable by the gateway.

@@ -16,7 +16,7 @@ notes:
 
 everything:
   enabled: true
-  image: ghcr.io/kumarabhik/everything-mcp:2026.8.31
+  image: ghcr.io/kumarabhik/everything-mcp:0.1.0   # platform release tag; the server version is pinned in its package-lock.json
   pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 20m, memory: 64Mi }

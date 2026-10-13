@@ -87,6 +87,27 @@ export function queryAudit(db: Db, f: AuditFilter): { rows: AuditRow[]; nextBefo
   return { rows, nextBeforeId: rows.length === f.limit ? rows[rows.length - 1].id : null };
 }
 
+// Columns of the CSV export, in order. user_id and api_key_id are ids, not secrets.
+const CSV_COLUMNS: (keyof AuditRow)[] = [
+  "id", "ts", "user_email", "user_id", "api_key_id", "source", "server_slug", "tool_name",
+  "exposed_name", "duration_ms", "outcome", "error", "args_preview",
+];
+
+// RFC 4180 quoting, plus the OWASP guard against formula injection: a cell that a spreadsheet would
+// run as a formula (tool arguments and errors come from users and upstreams) is prefixed with '.
+export function csvCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  let s = String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+export function auditCsv(rows: AuditRow[]): string {
+  const lines = [CSV_COLUMNS.join(",")];
+  for (const r of rows) lines.push(CSV_COLUMNS.map((c) => csvCell(r[c])).join(","));
+  return `${lines.join("\r\n")}\r\n`;
+}
+
 export function writeAudit(db: Db, e: AuditEntry): void {
   db.prepare(
     `insert into audit_log (request_id, user_id, user_email, api_key_id, source, server_id, server_slug,

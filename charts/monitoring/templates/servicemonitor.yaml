@@ -1,0 +1,17 @@
+# Prometheus scrapes platform-api's metrics port (9464): tool calls, latency, upstream health and
+# store provisioning (S8). Lives here, not in the platform chart, so the platform never needs the
+# Prometheus CRDs to install.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: platform-api
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Values.gateway.namespace | quote }}]
+  selector:
+    matchLabels:
+      {{- toYaml .Values.gateway.serviceSelector | nindent 6 }}
+  endpoints:
+    - port: {{ .Values.gateway.metricsPort | quote }}
+      path: /metrics
+      interval: {{ .Values.gateway.scrapeInterval }}

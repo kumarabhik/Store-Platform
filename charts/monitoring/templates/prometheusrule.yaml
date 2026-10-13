@@ -1,0 +1,55 @@
+# Alerts for the gateway (DESIGN §13.5). Every alert says which server is affected and what to check.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mcp-gateway
+spec:
+  groups:
+    - name: mcp-gateway
+      rules:
+        - alert: MCPUpstreamDown
+          expr: mcp_upstream_up == 0
+          for: {{ .Values.alerts.upstreamDownFor }}
+          labels: { severity: critical }
+          annotations:
+            summary: "MCP upstream '{{ "{{" }} $labels.server {{ "}}" }}' is down"
+            description: "The gateway's health probe has failed for {{ .Values.alerts.upstreamDownFor }}; its tools are hidden from clients. Check the Servers page (last error) and the upstream's pods."
+
+        - alert: MCPToolErrorRateHigh
+          expr: |
+            sum by (server) (rate(mcp_tool_calls_total{outcome=~"timeout|unreachable|tool_error"}[10m]))
+              / sum by (server) (rate(mcp_tool_calls_total[10m])) > {{ .Values.alerts.errorRateThreshold }}
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "Tool calls to '{{ "{{" }} $labels.server {{ "}}" }}' are failing"
+            description: "More than {{ mul .Values.alerts.errorRateThreshold 100 }}% of calls failed (timeout, unreachable or tool error) over 10 minutes. The audit log has each error."
+
+        - alert: MCPToolLatencyHigh
+          expr: |
+            histogram_quantile(0.95, sum by (server, le) (rate(mcp_tool_call_duration_seconds_bucket[10m])))
+              > {{ .Values.alerts.latencyP95Seconds }}
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "Tool calls to '{{ "{{" }} $labels.server {{ "}}" }}' are slow"
+            description: "p95 latency is above {{ .Values.alerts.latencyP95Seconds }} s over 10 minutes; calls time out at the server's timeout_ms."
+
+        - alert: StoreProvisioningFailed
+          expr: increase(store_provision_failed_total[15m]) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "A store failed to provision"
+            description: "Retries were used up. The store's events (Stores page timeline) and `kubectl -n store-<id> logs job/helm-install-<id>` show why."
+
+        # Found the hard way: on 2026-10-13 the nightly backups couldn't start (stale Calico token,
+        # SYSTEM.md L26) and nothing said so. kube-state-metrics exports each CronJob's last success.
+        - alert: BackupMissing
+          expr: |
+            time() - max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{cronjob=~".+-backup"})
+              > {{ mul .Values.alerts.backupMaxAgeHours 3600 }}
+          for: 15m
+          labels: { severity: critical }
+          annotations:
+            summary: "No successful backup of '{{ "{{" }} $labels.namespace {{ "}}" }}' for over {{ .Values.alerts.backupMaxAgeHours }} hours"
+            description: "Check `kubectl -n {{ "{{" }} $labels.namespace {{ "}}" }} get jobs` and the backup pod's events (a pod that can't start shows FailedCreatePodSandBox)."

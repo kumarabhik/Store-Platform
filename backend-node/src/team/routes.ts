@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db";
 import type { PublicUser } from "../auth";
-import { queryAudit } from "../gateway/audit";
+import { auditCsv, queryAudit } from "../gateway/audit";
 import { createApiKey, getApiKey, listApiKeys, revokeApiKey } from "../gateway/keys";
 import { acceptInvite, createInvite, listPendingInvites, revokeInvite } from "./invites";
 import { listMembers, TeamError, updateMember } from "./members";
@@ -21,6 +21,8 @@ export interface TeamRoutesDeps {
 
 const STATUS: Record<TeamError["code"], number> = { forbidden: 403, not_found: 404, conflict: 409, invalid: 400 };
 const role = z.enum(["admin", "member"]);
+// Rows in one CSV export; narrow the date range for more (X-Audit-Truncated says when it was cut).
+export const AUDIT_CSV_MAX_ROWS = 10_000;
 
 export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
   const { db } = deps;
@@ -110,26 +112,31 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
   });
 
   // ---- Audit log: admins see everyone, members only their own rows ----
-  app.get("/api/audit", async (req, reply) => {
+  const auditFilters = z.object({
+    user: z.string().trim().email().optional(),
+    server: z.string().max(24).optional(),
+    tool: z.string().max(64).optional(),
+    outcome: z.enum(["ok", "tool_error", "timeout", "unreachable", "denied", "not_found", "bad_request"]).optional(),
+    source: z.enum(["mcp", "chat"]).optional(),
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+    // Paging; only the JSON route uses these.
+    before_id: z.coerce.number().int().positive().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  });
+
+  // Parses the filters and applies the caller's scope. Returns null after replying 401/403/400.
+  function auditQuery(req: FastifyRequest, reply: FastifyReply) {
     const user = caller(req, reply, false);
-    if (!user) return;
-    const q = z
-      .object({
-        user: z.string().trim().email().optional(),
-        server: z.string().max(24).optional(),
-        tool: z.string().max(64).optional(),
-        outcome: z.enum(["ok", "tool_error", "timeout", "unreachable", "denied", "not_found", "bad_request"]).optional(),
-        source: z.enum(["mcp", "chat"]).optional(),
-        from: z.string().datetime().optional(),
-        to: z.string().datetime().optional(),
-        before_id: z.coerce.number().int().positive().optional(),
-        limit: z.coerce.number().int().min(1).max(200).default(50),
-      })
-      .safeParse(req.query ?? {});
-    if (!q.success) return reply.code(400).send({ error: "invalid", message: q.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+    if (!user) return null;
+    const q = auditFilters.safeParse(req.query ?? {});
+    if (!q.success) {
+      reply.code(400).send({ error: "invalid", message: q.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+      return null;
+    }
     const v = q.data;
     // A member's filter is overridden, not just hidden in the UI (SYSTEM.md I13).
-    const result = queryAudit(db, {
+    return {
       userId: user.role === "admin" ? undefined : user.id,
       userEmail: user.role === "admin" ? v.user : undefined,
       server: v.server,
@@ -140,8 +147,33 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
       to: v.to,
       beforeId: v.before_id,
       limit: v.limit,
-    });
+    };
+  }
+
+  app.get("/api/audit", async (req, reply) => {
+    const f = auditQuery(req, reply);
+    if (!f) return;
+    const result = queryAudit(db, f);
     return { rows: result.rows, next_before_id: result.nextBeforeId };
+  });
+
+  // CSV export for compliance reviews: the same filters and the same scoping as the page above,
+  // newest first, capped so one request can't hold the API for long.
+  app.get("/api/audit.csv", async (req, reply) => {
+    const f = auditQuery(req, reply);
+    if (!f) return;
+    // One extra row tells us whether the export was cut; paging (before_id) is ignored here.
+    const result = queryAudit(db, { ...f, beforeId: undefined, limit: AUDIT_CSV_MAX_ROWS + 1 });
+    const truncated = result.rows.length > AUDIT_CSV_MAX_ROWS;
+    const rows = truncated ? result.rows.slice(0, AUDIT_CSV_MAX_ROWS) : result.rows;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header("content-disposition", `attachment; filename="audit-${stamp}.csv"`)
+      .header("x-audit-rows", String(rows.length))
+      .header("x-audit-truncated", truncated ? "true" : "false")
+      .header("cache-control", "no-store")
+      .send(auditCsv(rows));
   });
 
   // ---- API keys: own keys for everyone, all keys for admins ----

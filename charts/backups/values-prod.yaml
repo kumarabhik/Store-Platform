@@ -1,0 +1,10 @@
+# k3s VPS. A backup on the same machine protects against mistakes, not against losing the VPS: for
+# that, point the upload jobs at an off-site S3 bucket instead (same code, other endpoint).
+# Create before installing:
+#   kubectl -n backups create secret generic backups-credentials \
+#     --from-literal=rpc-secret=$(openssl rand -hex 32) --from-literal=admin-token=$(openssl rand -hex 32) \
+#     --from-literal=access-key-id=GK$(openssl rand -hex 12) --from-literal=secret-access-key=$(openssl rand -hex 32)
+existingSecret: backups-credentials
+storage:
+  size: 20Gi
+  storageClassName: local-path

@@ -20,6 +20,10 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "store.selectorLabels" (dict "ctx" . "component" "init") | nindent 14 }}
+        # The nightly backup's dump step (templates/backup-cronjob.yaml).
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" (dict "ctx" . "component" "backup") | nindent 14 }}
       ports:
         - port: 3306
           protocol: TCP
@@ -119,6 +123,37 @@ spec:
       ports:
         - { port: 80, protocol: TCP }
         - { port: 443, protocol: TCP }
+---
+{{- end }}
+{{- if .Values.backup.enabled }}
+# The backup job reads this store's database and writes to the backup store, nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-backup-egress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" (dict "ctx" . "component" "backup") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" (dict "ctx" . "component" "mariadb") | nindent 14 }}
+      ports:
+        - { port: 3306, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.backup.storeNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: garage
+      ports:
+        - { port: 3900, protocol: TCP }
 ---
 {{- end }}
 # woo-mcp only ever calls this store's WordPress REST API.

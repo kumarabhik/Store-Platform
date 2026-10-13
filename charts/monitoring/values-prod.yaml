@@ -1,0 +1,24 @@
+# k3s VPS: Traefik, TLS from cert-manager, local-path storage so data survives restarts.
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources: { requests: { storage: 5Gi } }
+  grafana:
+    ingress:
+      enabled: true
+      ingressClassName: traefik
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+      hosts: [grafana.your-vps-domain.com]
+      tls:
+        - secretName: grafana-tls
+          hosts: [grafana.your-vps-domain.com]
+    persistence:
+      enabled: true
+      storageClassName: local-path
+      size: 1Gi

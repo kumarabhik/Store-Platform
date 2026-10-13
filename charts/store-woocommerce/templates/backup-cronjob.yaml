@@ -1,0 +1,90 @@
+{{- if .Values.backup.enabled }}
+# Nightly backup of this store's database to the backup store (DESIGN §13.6). The dump runs with the
+# store's own app user; the upload signs an S3 request with curl (--aws-sigv4), so no SDK is needed.
+# Files are named by weekday (Mon..Sun) plus "latest": seven days are kept without a cleanup job.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "store.fullname" . }}-backup
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: {{ .Values.site.timezone | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "store.selectorLabels" (dict "ctx" . "component" "backup") | nindent 12 }}
+            # Lets the backup store's NetworkPolicy admit this pod (charts/backups).
+            store-platform/backup-client: "true"
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: dump
+              image: {{ .Values.images.mariadb }}
+              imagePullPolicy: {{ .Values.images.pullPolicy }}
+              command: ["sh", "-c"]
+              args:
+                - >-
+                  set -eu;
+                  mariadb-dump -h {{ include "store.fullname" . }}-mariadb -u {{ .Values.mariadb.user }}
+                  --single-transaction --no-tablespaces {{ .Values.mariadb.database }} | gzip > /backup/dump.sql.gz;
+                  ls -l /backup/dump.sql.gz
+              env:
+                # MYSQL_PWD keeps the password off the command line (and out of `ps`).
+                - name: MYSQL_PWD
+                  valueFrom: { secretKeyRef: { name: {{ include "store.secretName" . }}, key: mariadb-password } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits: { memory: 256Mi }
+              volumeMounts:
+                - { name: backup, mountPath: /backup }
+          containers:
+            - name: upload
+              image: {{ .Values.backup.curlImage }}
+              imagePullPolicy: {{ .Values.images.pullPolicy }}
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  for name in $(date +%a) latest; do
+                    curl -fsS --aws-sigv4 "aws:amz:$S3_REGION:s3" --user "$S3_KEY_ID:$S3_SECRET" \
+                      -T /backup/dump.sql.gz "$S3_ENDPOINT/$S3_BUCKET/stores/{{ .Release.Name }}/$name.sql.gz"
+                    echo "uploaded stores/{{ .Release.Name }}/$name.sql.gz"
+                  done
+              env:
+                - { name: S3_ENDPOINT, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: endpoint } } }
+                - { name: S3_BUCKET, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: bucket } } }
+                - { name: S3_REGION, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: region } } }
+                - { name: S3_KEY_ID, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: access-key-id } } }
+                - { name: S3_SECRET, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: secret-access-key } } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts:
+                - { name: backup, mountPath: /backup, readOnly: true }
+          volumes:
+            - name: backup
+              emptyDir: { sizeLimit: 1Gi }
+{{- end }}

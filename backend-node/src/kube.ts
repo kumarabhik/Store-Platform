@@ -116,6 +116,33 @@ export function parseApiServerEndpoints(raw: string | undefined): ApiServerEndpo
     .filter((e) => /^[0-9a-f.:]+$/i.test(e.ip) && Number.isInteger(e.port) && e.port > 0);
 }
 
+// Writes Secret "backup-s3" (what the store chart's backup CronJob reads, DESIGN §13.6) with this
+// store's own key and bucket on the backup store.
+export async function writeBackupSecret(
+  core: k8s.CoreV1Api,
+  ns: string,
+  v: { endpoint: string; bucket: string; region: string; accessKeyId: string; secretAccessKey: string }
+) {
+  const b64 = (s: string) => Buffer.from(s).toString("base64");
+  const body: k8s.V1Secret = {
+    metadata: { name: "backup-s3" },
+    type: "Opaque",
+    data: {
+      endpoint: b64(v.endpoint),
+      bucket: b64(v.bucket),
+      region: b64(v.region),
+      "access-key-id": b64(v.accessKeyId),
+      "secret-access-key": b64(v.secretAccessKey),
+    },
+  };
+  try {
+    await core.replaceNamespacedSecret("backup-s3", ns, body);
+  } catch (e: any) {
+    if (statusCodeOf(e) !== 404) throw e;
+    await core.createNamespacedSecret(ns, body);
+  }
+}
+
 // Pods of the provisioner's Helm jobs carry this label, so a policy can give them (and only them)
 // access to the Kubernetes API.
 export const HELM_JOB_LABELS = { "app.kubernetes.io/name": "store-helm" };

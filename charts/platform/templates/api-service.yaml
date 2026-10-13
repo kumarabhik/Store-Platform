@@ -2,6 +2,9 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "platform.apiName" . }}
+  # Prometheus finds this Service by label (charts/monitoring ServiceMonitor).
+  labels:
+    app: {{ include "platform.apiName" . }}
 spec:
   selector:
     app: {{ include "platform.apiName" . }}

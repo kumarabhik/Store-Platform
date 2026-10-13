@@ -125,4 +125,27 @@ spec:
               app: {{ include "platform.apiName" . }}
       ports:
         - { port: 8000, protocol: TCP }
+{{- if .Values.backup.enabled }}
+---
+# The nightly platform backup only uploads to the backup store (DNS comes from allow-dns).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "platform.apiName" . }}-backup
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "platform.apiName" . }}-backup
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.backup.storeNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: garage
+      ports:
+        - { port: 3900, protocol: TCP }
+{{- end }}
 {{- end }}

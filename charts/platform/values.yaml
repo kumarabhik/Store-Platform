@@ -55,6 +55,9 @@ api:
     # chart's values files to apply (local/prod).
     STORE_CHART_IMAGE: "store-platform/store-chart:dev"
     STORE_CHART_ENV: "local"
+    # Backup store credentials ("<namespace>/<secret>", charts/backups). New stores get a nightly
+    # backup when it exists; without it they are provisioned without backups (DESIGN §13.6).
+    BACKUP_SOURCE_SECRET: "backups/backups-credentials"
     BACKUP_DIR: "/data/backups"
     DASHBOARD_PUBLIC_URL: "http://dashboard.127.0.0.1.nip.io"
     # Shown on the dashboard's Connect page; external MCP clients use this URL.
@@ -107,6 +110,16 @@ api:
     enabled: true
     size: 1Gi
     storageClassName: ""
+
+# Nightly backup of the platform database to the backup store (charts/backups, DESIGN §13.6).
+# Needs Secret `s3SecretName` in this namespace; ops/up.ps1 and deploy.sh copy it from the store.
+backup:
+  enabled: false
+  schedule: "0 2 * * *"
+  timeZone: "Asia/Kolkata"
+  s3SecretName: backup-s3
+  curlImage: curlimages/curl:8.11.1
+  storeNamespace: backups
 
 dashboard:
   enabled: true

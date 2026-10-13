@@ -69,6 +69,17 @@ wooMcp:
     requests: { cpu: 20m, memory: 64Mi }
     limits: { memory: 256Mi }
 
+# Nightly database backup to the backup store (charts/backups, DESIGN §13.6). Needs Secret
+# `s3SecretName` in this namespace (keys: endpoint, bucket, region, access-key-id, secret-access-key);
+# ops/up.ps1 and the provisioner copy it from the backup store.
+backup:
+  enabled: false
+  schedule: "30 2 * * *"          # 02:30 in site.timezone
+  s3SecretName: backup-s3
+  curlImage: curlimages/curl:8.11.1
+  # Where the backup store's S3 port lives, for this namespace's egress rule.
+  storeNamespace: backups
+
 networkPolicy:
   enabled: true
   # Namespace of the ingress controller pods (ingress-nginx locally, kube-system for Traefik on k3s).

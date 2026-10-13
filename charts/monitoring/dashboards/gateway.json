@@ -1,0 +1,73 @@
+{
+  "uid": "mcp-gateway",
+  "title": "MCP Gateway",
+  "description": "Tool calls through the gateway, failures, latency and upstream health (DESIGN §13.5).",
+  "tags": ["mcp", "gateway"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "datasource", "label": "Prometheus", "type": "datasource", "query": "prometheus", "current": {}, "hide": 0 }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Upstreams up",
+      "description": "1 = the gateway's last health probe succeeded. A server at 0 has its tools hidden.",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "refId": "A", "expr": "mcp_upstream_up", "legendFormat": "{{server}}", "instant": true }],
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      }
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Tool calls per second, by server",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "refId": "A", "expr": "sum by (server) (rate(mcp_tool_calls_total[5m]))", "legendFormat": "{{server}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Calls that didn't succeed, by outcome",
+      "description": "denied = permission or a declined approval; not_found = unknown tool; the rest are failures.",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "refId": "A", "expr": "sum by (outcome) (rate(mcp_tool_calls_total{outcome!=\"ok\"}[5m]))", "legendFormat": "{{outcome}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "p95 latency, by server",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (server, le) (rate(mcp_tool_call_duration_seconds_bucket[5m])))", "legendFormat": "{{server}}" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 5, "type": "table", "title": "Busiest tools, last hour",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "refId": "A", "expr": "topk(10, sum by (server, tool) (increase(mcp_tool_calls_total[1h])))", "format": "table", "instant": true }],
+      "transformations": [{ "id": "organize", "options": { "excludeByName": { "Time": true }, "renameByName": { "Value": "calls" } } }]
+    },
+    {
+      "id": 6, "type": "stat", "title": "Stores",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "refId": "A", "expr": "stores_created_total", "legendFormat": "created", "instant": true },
+        { "refId": "B", "expr": "store_provision_success_total", "legendFormat": "provisioned", "instant": true },
+        { "refId": "C", "expr": "store_provision_failed_total", "legendFormat": "failed", "instant": true },
+        { "refId": "D", "expr": "store_deleted_total", "legendFormat": "deleted", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# minikube: Grafana through the same ingress port-forward as everything else (README §1).
+alerts:
+  # Short, so the demo can show an alert firing and resolving.
+  upstreamDownFor: 1m
+
+kube-prometheus-stack:
+  grafana:
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      hosts: [grafana.127.0.0.1.nip.io]

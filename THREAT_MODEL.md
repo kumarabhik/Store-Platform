@@ -75,10 +75,13 @@ It **cannot**:
 - woo-mcp is ClusterIP-only with no Ingress, and requires its own bearer token on top of the NetworkPolicy.
 - The provisioner's Helm jobs run non-root under a narrow `store-installer` role bound per store namespace (no `admin`, can't create roles or exec into pods).
 - Prometheus metrics are on a separate port with no Ingress, reachable only from the `monitoring` namespace: per-tool counters would otherwise reveal admin-only tool names.
+- Each provisioned store's backup job has its own object-storage key, allowed only on its own bucket `store-<id>`: it can't read or overwrite another store's backups (tested live: 403). The provisioner creates the key through Garage's admin API, which only platform-api and the bootstrap job can reach, and revokes it when the store is deleted.
+- The audit CSV export applies the same scoping as the page (a member gets only their own rows) and neutralises cells a spreadsheet would run as formulas, since tool arguments and errors come from users and upstreams.
 
 ## Known gaps (planned, not built)
 
 | Gap | Why it matters | Roadmap |
 |---|---|---|
-| Reconciler shares the internet-facing pod | A full API compromise would get its namespace-creating RBAC; fix is to split `platform-controller` | DESIGN §4.1, P8 |
+| Reconciler shares the internet-facing pod | A full API compromise would get its namespace-creating RBAC and the backup store's admin token; fix is to split `platform-controller` | DESIGN §4.1, P8 |
+| The default store and the platform DB share one backup key | Provisioned stores have their own keys; `store-default` (installed by Helm, not the provisioner) still uses the bootstrap key, so a compromised `store-default` namespace could overwrite the platform DB's backup | DESIGN §13.6 |
 | OAuth on the gateway | Today keys are bearer secrets; OAuth would add expiry and consent | S3 |

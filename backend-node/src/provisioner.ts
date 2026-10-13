@@ -15,6 +15,7 @@ import {
   deleteNamespace,
   waitForAnyDeploymentAvailable,
   waitForDeploymentAvailable,
+  writeBackupSecret,
   type ApiServerEndpoint,
 } from "./kube";
 import { buildEngineValues, CHART_DIR } from "./engine";
@@ -81,6 +82,11 @@ type Config = {
   apiServer: ApiServerEndpoint[];
   // ClusterRole bound for the Helm job in each store namespace (ROADMAP S6).
   installerRole: string;
+  // Per-store backup access (DESIGN §13.6): a key and bucket of the store's own; null = no backup store.
+  backup?: {
+    ensure(storeId: string): Promise<{ endpoint: string; bucket: string; region: string; accessKeyId: string; secretAccessKey: string } | null>;
+    revoke(storeId: string): Promise<void>;
+  } | null;
   storePublicScheme?: string;
   storePublicPort?: string;
 };
@@ -141,6 +147,8 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
         try {
           // Tools first: clients must stop seeing the store before its pods go away.
           await hooks?.onRemove(storeId);
+          // Its backup key goes too; the bucket (its last backups) is kept.
+          await cfg.backup?.revoke(storeId);
           const exists = await namespaceExists(kube, ns);
           if (!exists) {
             addEvent(db, storeId, "delete_skip_missing_namespace", ns);
@@ -209,6 +217,11 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
         const release = `wc-${storeId}`;
         const jobName = `helm-install-${storeId}`;
 
+        const access = cfg.backup ? await cfg.backup.ensure(storeId) : null;
+        if (access) await writeBackupSecret(kube.core, ns, access);
+        const backup = !!access;
+        addEvent(db, storeId, backup ? "backup_enabled" : "backup_skipped", backup ? `nightly, to bucket ${access!.bucket} with the store's own key` : "no backup store installed");
+
         const engine = row.engine as "woocommerce" | "medusa";
         const built = buildEngineValues({
           engine,
@@ -216,6 +229,7 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
           host,
           publicUrl: url,
           storeName: String(row.name ?? "").trim() || `Store ${storeId}`,
+          backup,
         });
 
         if (built.stubbed) throw new Error(built.reason);

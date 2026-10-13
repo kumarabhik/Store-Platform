@@ -1,7 +1,7 @@
 # SYSTEM — Invariants, hard-won lessons, and gotchas
 
 This file is the project's memory. It records **things that cost time to learn** and **rules that must not be broken**.
-Read it before changing anything (see [AGENTS.md](AGENTS.md)). Design lives in [DESIGN.md](DESIGN.md), and progress lives in [ROADMAP.md](ROADMAP.md).
+Read it before changing anything (see [AGENTS.md](AGENTS.md)). §5 lists the verified results to quote in the demo. Design lives in [DESIGN.md](DESIGN.md), and progress lives in [ROADMAP.md](ROADMAP.md).
 
 How to add an entry: use the template at the bottom. Keep entries short. Always include **Symptom → Cause → Fix → Where**.
 
@@ -228,6 +228,61 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Cause:** curl buffers its output when stdout is not a terminal; the SSE events sat in curl's buffer instead of the file the script was polling.
 - **Fix:** `curl -N` (no buffering) for every streamed response a script reacts to while it runs ([dod.sh](scripts/dod.sh) `chat`).
 
+### L39 — Grafana downloaded plugins on every start and the liveness probe killed it
+- **Symptom:** `monitoring-grafana` stuck at 2/3 Ready with restarts; events `Liveness probe failed … connection refused`; the log showed `Installing plugin pluginId=grafana-lokiexplore-app` taking ~18 s, plus SQLite lock retries.
+- **Cause:** recent Grafana versions preinstall plugins from the internet at startup; together with first-time migrations the server didn't listen before the liveness probe gave up.
+- **Fix:** `grafana.ini: plugins: preinstall_disabled: true` ([charts/monitoring/values.yaml](charts/monitoring/values.yaml)); ready in ~60 s afterwards. **Carry forward:** a pod shouldn't need the internet to start.
+
+### L40 — MinIO images can't be pulled anymore; Garage instead
+- **Symptom:** `docker pull minio/minio:RELEASE.2025-…` → `pull access denied`; `quay.io/minio/minio:…` → `unauthorized`.
+- **Cause:** MinIO stopped publishing free images.
+- **Fix:** Garage (`dxflrs/garage:v1.3.0`), approved by the owner. Gotchas: its image has no shell (bootstrap through the admin API from a curl image), and the admin API pretty-prints JSON (`"node": "…"`), so `grep` patterns need optional spaces.
+
+### L41 — A ServiceMonitor selects Services by their labels
+- **Symptom:** Prometheus loaded the rules but had no `platform-api` target.
+- **Cause:** the `platform-api` Service had only a pod selector, no labels of its own.
+- **Fix:** `labels: app: platform-api` on the Service ([api-service.yaml](charts/platform/templates/api-service.yaml)).
+
+### L42 — The narrow install role (S6) blocked the first chart change that added a new kind
+- **Symptom:** re-provisioning a store failed 5 times: `cronjobs.batch "wc-…-backup" is forbidden: User "system:serviceaccount:store-…:default" cannot get resource "cronjobs"`.
+- **Cause:** `store-installer` lists exactly the kinds the store chart creates; the backup CronJob was new.
+- **Fix:** add `cronjobs` to the role ([api-rbac.yaml](charts/platform/templates/api-rbac.yaml)). **Carry forward:** a new kind in `charts/store-woocommerce` needs the role updated in the same change; that's least privilege working, not a bug.
+
+### L43 — After a rollout the gateway still saw the old woo-mcp tools for a while
+- **Symptom:** the new woo-mcp image had 9 tools, but a gateway probe right after `rollout restart` still listed 6.
+- **Cause:** the old pod was still `Terminating`, and the gateway's kept-alive HTTP connection still reached it.
+- **Fix:** nothing to fix; the next probe after the old pod exits sees the new tools. When checking a rollout, wait until only the new pod remains.
+
+### L44 — k3s (kube-router) applies NetworkPolicies asynchronously; and a probe that never ran passed as "blocked"
+- **Symptom:** on k3s (`scripts/k3d-prod-test.sh`) the isolation suite failed 1-2 different checks per run: a fresh probe pod reached WordPress it shouldn't, an allowed backup client was blocked, once even `platform-api -> notes-mcp` was blocked (although the gateway used it fine). Every check passed when run alone.
+- **Cause:** k3s enforces NetworkPolicies with kube-router, which programs rules asynchronously: a new pod gets its rules a moment after it starts, and each pod the suite creates makes it rebuild its rule sets. Calico (minikube) programs a pod's rules before it starts. Separately, a run started while the previous run's `np-other` namespace was still terminating, so probe pods couldn't be created, and the script counted "couldn't create the pod" as "blocked".
+- **Fix:** ([verify-store-isolation.sh](scripts/verify-store-isolation.sh)) every probe prints `OPEN`/`CLOSED`; anything else is `error` and fails. Probe pods wait 3 s, try up to 5 times when expecting "open" (a "blocked" expectation treats any success as a leak), and a mismatch is repeated twice. The script waits until the old `np-other` is gone.
+- **Carry forward:** on k3s a brand-new pod can briefly talk before its default-deny is in place. Our workloads only get traffic after their readiness probes, but don't rely on NetworkPolicy for the first seconds of a pod's life. A negative test must prove it actually ran (L15, L21).
+
+### L45 — A dead upstream fails differently on k3s and minikube
+- On minikube (Calico) a Service with no pods times out ("timed out after 3000 ms", L30); on k3s it is refused at once ("ECONNREFUSED"). Both are reported clearly; the dashboard, alerts and `dod.sh` don't depend on which.
+
+### L46 — One night's backups silently never ran
+- **Symptom:** on 2026-10-13 no store or platform backup had run, and nothing said so: no failed alert, the CronJobs looked normal at a glance.
+- **Cause:** the stale Calico token (L26). Running pods were fine, but every backup Job's new pod failed with `FailedCreatePodSandBox` until the Job gave up. A pod that never starts produces no "backup failed" signal.
+- **Fix:** `kubectl -n kube-system rollout restart ds/calico-node`, then the alert `BackupMissing` ([prometheusrule.yaml](charts/monitoring/templates/prometheusrule.yaml)): no successful `*-backup` CronJob run for 26 h (kube-state-metrics). [preflight.sh](scripts/preflight.sh) checks for recent sandbox errors and backup age.
+- **Carry forward:** alert on the **absence of success** for anything scheduled, never only on failures.
+
+### L47 — Grafana answered 503 now and then
+- **Symptom:** `grafana.127.0.0.1.nip.io` sometimes returned 503; the pod showed `2/3` Ready.
+- **Cause:** the chart's readiness probe times out after 1 s; on a busy single node `/api/health` was sometimes slower (217 failures in 25 h), and every failure took Grafana out of its Service.
+- **Fix:** readiness timeout 5 s, and Grafana's update checks off (nothing in the cluster should call the internet) in [charts/monitoring/values.yaml](charts/monitoring/values.yaml).
+
+### L48 — Git Bash rewrote `/readyz` into a Windows path
+- **Symptom:** `kubectl get --raw /readyz` in Git Bash → `NotFound`, so the first preflight run reported the cluster as down.
+- **Cause:** MSYS path conversion turns an argument starting with `/` into `C:/Program Files/Git/readyz` (G11).
+- **Fix:** the preflight checks the cluster with `kubectl get ns default`; elsewhere prefix `MSYS_NO_PATHCONV=1`.
+
+### L49 — The browser hid the CSV's file name from the dashboard
+- **Symptom:** curl showed `Content-Disposition` and `X-Audit-Rows` on `/api/audit.csv`, but the dashboard (another origin) would read `null`.
+- **Cause:** for a cross-origin `fetch`, browsers expose only a few "safe" response headers unless the server lists the rest in `Access-Control-Expose-Headers`.
+- **Fix:** `exposedHeaders` in the CORS setup ([server.ts](backend-node/src/server.ts)). Checked with an `Origin:` header.
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)
@@ -321,7 +376,63 @@ No `&&` / `||` (use `; if ($?) { … }`); `curl` is an alias, so use `curl.exe`.
 
 ---
 
-## 5. Useful commands
+## 5. Verified results (talking points for the demo video)
+
+Every line below was run, not just written. Dates are when it last passed; ROADMAP.md has the full proof per item. Re-run any of them before recording.
+
+### Tests and checks
+| What | Result | How to show it |
+|---|---|---|
+| Backend tests (gateway, team, chat, approvals, store registration, metrics, search, backup keys, audit CSV) | 113/113 | `bash scripts/test-backend.sh` |
+| woo-mcp tests (OAuth 1.0a signer with vectors from WooCommerce's own PHP, 9 tools) | 27/27 | `npm --prefix mcp-servers/woo-mcp test` |
+| notes-mcp tests | 6/6 | `npm --prefix mcp-servers/notes-mcp test` |
+| CI on GitHub (tests, lint, Helm for 5 charts × local/prod, all 6 images) | 12/12 jobs green | GitHub → Actions |
+| Kubernetes schema check of every rendered manifest (kubeconform, strict, incl. Prometheus CRDs) | 335/335 valid, 0 skipped | CI `helm` job |
+| Per-store backup keys | store key: own bucket 200, shared bucket read 403, write 403; delete → key revoked, bucket kept | `backup-store.test.ts`; DESIGN §13.6 |
+| Pre-recording check | 17/17 PASS; fails with a hint when the port-forward is down | `bash scripts/preflight.sh` |
+| Definition of done, end to end (two users, chat + external client, permissions, approval, disable/kill/revoke, audit) | 19/19 on minikube **and** on k3s | `bash scripts/dod.sh` |
+| Network isolation (real connections, positive and negative, ingress and egress, store-to-store, backup store) | 40/40 on minikube **and** on k3s (3 runs in a row) | `bash scripts/verify-store-isolation.sh` |
+| Restore drill (fresh backup → scratch database → counts compared) | passed on two stores (10 orders/13 products; 2/4) | `bash scripts/restore-drill.sh` |
+| Production path on k3s (values-prod.yaml + deploy.sh unchanged, Traefik, local-path) | all releases deployed; DoD 19/19; isolation 40/40 | `bash scripts/k3d-prod-test.sh` |
+
+### Things that happened live (good stories for the video)
+- **Kill an upstream:** `notes-mcp` scaled to 0 → Servers page shows Unreachable with the reason, other servers keep working, the Prometheus alert `MCPUpstreamDown` went pending after 84 s, fired at 146 s, resolved after the restore.
+- **Revoke a key:** the member's very next `/mcp` call got HTTP 401 (keys are looked up on every request, no cache).
+- **Tool permissions:** a member's client lists 24 tools and no write tools; calling `woo__create_product` directly gets "Unknown tool", indistinguishable from a tool that doesn't exist, and the audit log records `denied`.
+- **Human approval:** the chat asked before `create_product` (approved → product created) and before `update_order_status(26, cancelled)` (declined → order still `processing`, audit says "declined by the user in the chat").
+- **Two stores, one question:** "Compare today's orders in Anku Shop and Bharat Bazaar" → the agent called `store_550560c1__list_orders` and `store_c6f26425__list_orders` → "1 order ₹199 vs 2 orders ₹398" (correct).
+- **Delete a store:** its `store_<id>__*` tools vanished from clients at once (registration removed first); the namespace was gone 51 s later.
+- **Restart during provisioning:** the API pod was restarted while a store's Helm job ran → the new pod reclaimed the store after the 60 s lease, attached to the running job instead of killing it (`helm_job_attached`), one clean release revision, Ready.
+- **Rollback:** `helm rollback platform 10` (a revision without the metrics port) → healthy → `helm upgrade --atomic` forward again.
+- **Search mode for many tools:** tool definitions sent per chat turn went from 16 796 bytes (28 tools) to 1 001 bytes (-94%), and the chat still answered "orders today" (search → call).
+- **Audit CSV:** a member asked for everyone's rows and got only their own 46; the admin's `outcome=denied` export had 11 rows.
+- **Merchant tools:** "sales today" → `sales_summary` (8 orders, ₹3,792, no approval needed: read-only); "refund ₹1 on order 34" → approval card → refund recorded.
+
+### Bugs the checks caught (shows the testing is real)
+- A LimitRange default was silently dropped by the Kubernetes client (`_default` vs `default`), so a single store exceeded its own quota (L32).
+- The readiness check followed WordPress's redirect to an address that doesn't exist inside the cluster (L33).
+- Re-creating the Helm job on retry could leave a release stuck "pending"; now the reconciler attaches to the running job and recovers (L34).
+- `/metrics` on the public port would have revealed admin-only tool names; moved to an in-cluster port (L37).
+- The narrow install role correctly blocked the new backup CronJob until it was added on purpose (L42).
+- The isolation test counted "probe pod never started" as "blocked"; now every probe must report OPEN or CLOSED (L44).
+- MinIO stopped publishing images; the backups use Garage instead (L40).
+- One night every backup silently didn't run (new pods couldn't start); now `BackupMissing` alerts on the absence of success (L46).
+
+### Numbers worth quoting
+| | |
+|---|---|
+| Upstream MCP servers behind one URL | 3 + one per provisioned store (woo, notes, everything, store_&lt;id&gt;) |
+| Tools exposed | 34 for an admin with one extra store (9 per store × 2, 3 notes, 13 reference server); 28 for a member |
+| Per-call timeout / health probe / backoff | 15 s / every 15 s, 3 s timeout / 15 s → 5 min with ±20% jitter |
+| Bulkhead / max result size | 16 in-flight calls per upstream / 256 KB |
+| Per-key rate limit | burst 120, then 2/s |
+| Chat loop | ≤ 8 tool rounds, 120 s, ≤ 4 parallel calls, approvals time out after 60 s |
+| Backups | nightly, 7 days kept (Mon…Sun + latest), every store + platform DB |
+| Alerts | 5 rules: upstream down, error rate, latency, failed provisioning, backup missing |
+
+---
+
+## 6. Useful commands
 ```powershell
 # bring up / resume / down (local, Windows)
 powershell -ExecutionPolicy Bypass -File .\ops\up.ps1
@@ -344,7 +455,7 @@ kubectl -n store-default port-forward svc/store-default-wordpress 8091:80
 
 ---
 
-## 6. Entry template
+## 7. Entry template
 ```markdown
 ### Lnn — <short title>
 - **Symptom:** what you saw (exact error text helps future grep)

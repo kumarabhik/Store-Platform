@@ -43,6 +43,8 @@ need_secret platform platform-api-env \
   'kubectl -n platform create secret generic platform-api-env --from-literal=LLM_API_KEY=<groq key> --from-literal=ADMIN_API_KEY=$(openssl rand -hex 24)'
 need_secret store-default store-default-credentials \
   'kubectl -n store-default create secret generic store-default-credentials --from-literal=mariadb-root-password=$(openssl rand -hex 16) --from-literal=mariadb-password=$(openssl rand -hex 16) --from-literal=wordpress-admin-password=$(openssl rand -hex 12) --from-literal=woo-consumer-key=ck_$(openssl rand -hex 20) --from-literal=woo-consumer-secret=cs_$(openssl rand -hex 20) --from-literal=mcp-token=$(openssl rand -hex 24)'
+need_secret backups backups-credentials \
+  'kubectl -n backups create secret generic backups-credentials --from-literal=rpc-secret=$(openssl rand -hex 32) --from-literal=admin-token=$(openssl rand -hex 32) --from-literal=access-key-id=GK$(openssl rand -hex 12) --from-literal=secret-access-key=$(openssl rand -hex 32)'
 need_secret mcp-servers upstreams-credentials \
   'kubectl -n mcp-servers create secret generic upstreams-credentials --from-literal=notes-mcp-token=$(openssl rand -hex 24)'
 [ "$missing" -eq 0 ] || fail "$missing Secret(s) missing; create them and run again"
@@ -59,6 +61,11 @@ install() {  # install <release> <chart> <namespace>
 install platform platform platform
 install store-default store-woocommerce store-default
 install upstreams mcp-upstreams mcp-servers
+install backups backups backups
+bash scripts/backup-secret.sh platform store-default
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
+helm dependency build charts/monitoring >/dev/null
+install monitoring monitoring monitoring
 
 domain=$(sed -n 's/^  baseDomain: "\(.*\)"/\1/p' charts/platform/values-prod.yaml)
 echo

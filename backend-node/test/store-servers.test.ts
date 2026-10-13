@@ -23,6 +23,8 @@ describe("per-store Helm values (DESIGN §11)", () => {
     expect(yaml.split("\n").filter((l) => l.startsWith("existingSecret:"))).toEqual([`existingSecret: ""`]);
     expect(yaml).toContain(`publicUrl: "http://store-ab12cd34.127.0.0.1.nip.io:8088"`);
     expect(yaml).toContain(`  host: "store-ab12cd34.127.0.0.1.nip.io"`);
+    expect(yaml).toContain("backup:\n  enabled: false"); // only on when the upload Secret was copied
+    expect(buildEngineValues({ engine: "woocommerce", ingressClassName: "nginx", host: "h", publicUrl: "u", storeName: "n", backup: true }).valuesYaml).toContain("backup:\n  enabled: true");
   });
 
   it("keeps medusa stubbed", () => {

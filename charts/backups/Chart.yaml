@@ -1,0 +1,6 @@
+apiVersion: v2
+name: backups
+description: S3-compatible backup store (Garage) for the nightly database dumps (DESIGN §13.6)
+type: application
+version: 0.1.0
+appVersion: "v1.3.0"

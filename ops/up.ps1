@@ -199,6 +199,19 @@ Install-DefaultStore
 Write-Host "Installing/upgrading upstream MCP servers (notes-mcp, everything-mcp)..."
 helm upgrade --install upstreams ./charts/mcp-upstreams -n mcp-servers --create-namespace `
   -f ./charts/mcp-upstreams/values-local.yaml --wait --timeout 5m | Out-Host
+# Backup store (Garage, DESIGN §13.6) and the upload key for the platform's and default store's
+# nightly backup CronJobs (new stores get theirs from the provisioner).
+Write-Host "Installing/upgrading backup store (Garage)..."
+helm upgrade --install backups ./charts/backups -n backups --create-namespace `
+  -f ./charts/backups/values.yaml -f ./charts/backups/values-local.yaml --wait --timeout 6m | Out-Host
+bash scripts/backup-secret.sh platform store-default | Out-Host
+# Prometheus, Alertmanager and Grafana (DESIGN §13.5): http://grafana.127.0.0.1.nip.io:8088, user admin,
+# password in Secret monitoring/monitoring-grafana. The chart's dependency is downloaded once.
+Write-Host "Installing/upgrading monitoring (Prometheus, Grafana)..."
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update | Out-Null
+helm dependency build ./charts/monitoring | Out-Host
+helm upgrade --install monitoring ./charts/monitoring -n monitoring --create-namespace `
+  -f ./charts/monitoring/values.yaml -f ./charts/monitoring/values-local.yaml --wait --timeout 10m | Out-Host
 if (-not $SkipImageBuild) {
   # Same :dev tag after a rebuild, so Kubernetes would keep the old container (SYSTEM.md L12).
   kubectl -n store-default rollout restart deploy/store-default-woo-mcp | Out-Host
@@ -210,6 +223,7 @@ Write-Host ""
 Write-Host "Up complete."
 Write-Host "Dashboard: http://dashboard.127.0.0.1.nip.io:8088  (in-cluster; Vite dev server: http://127.0.0.1:5173)"
 Write-Host "Gateway:   http://api.127.0.0.1.nip.io:8088/mcp"
+Write-Host "Grafana:   http://grafana.127.0.0.1.nip.io:8088  (admin; password: kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}')"
 Write-Host "API:       http://127.0.0.1:8080/healthz"
 Write-Host "Store:     http://store.127.0.0.1.nip.io:8088  (admin: /wp-admin, user 'admin')"
 Write-Host "Stores:    http://store-<id>.127.0.0.1.nip.io:8088"

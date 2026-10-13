@@ -6,6 +6,8 @@ name: CI
 on:
   push:
     branches: [main, mcp-gateway]
+    # A version tag (v0.1.0) also publishes the images to GHCR for the VPS (values-prod.yaml).
+    tags: ["v*"]
   pull_request:
 
 concurrency:
@@ -78,7 +80,7 @@ jobs:
       - run: npm run build
 
   helm:
-    name: Helm (lint + template, local and prod)
+    name: Helm (lint, render, schema-validate; local and prod)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -88,14 +90,27 @@ jobs:
       - name: Lint and render every chart with both environments' values
         run: |
           set -euo pipefail
-          for chart in platform store-woocommerce mcp-upstreams; do
+          # monitoring wraps kube-prometheus-stack (pinned in Chart.yaml/Chart.lock).
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm dependency build charts/monitoring
+          mkdir -p rendered
+          for chart in platform store-woocommerce mcp-upstreams monitoring backups; do
             for env in local prod; do
               echo "::group::$chart ($env)"
               helm lint "charts/$chart" -f "charts/$chart/values.yaml" -f "charts/$chart/values-$env.yaml"
-              helm template ci "charts/$chart" -n ci -f "charts/$chart/values.yaml" -f "charts/$chart/values-$env.yaml" > /dev/null
+              helm template ci "charts/$chart" -n ci -f "charts/$chart/values.yaml" -f "charts/$chart/values-$env.yaml" > "rendered/$chart-$env.yaml"
               echo "::endgroup::"
             done
           done
+      # Every rendered object checked against the real Kubernetes API schema (wrong field names,
+      # wrong types, unknown fields with -strict), including the Prometheus CRDs.
+      - name: Validate rendered manifests (kubeconform)
+        run: |
+          docker run --rm -v "$PWD/rendered:/m" ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary -kubernetes-version 1.31.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /m
 
   scripts:
     name: Shell scripts (syntax)
@@ -115,22 +130,36 @@ jobs:
     name: Image build (${{ matrix.name }})
     runs-on: ubuntu-24.04
     needs: [backend, mcp-servers, dashboard, helm]
+    # packages: write is only used on version tags, to push to ghcr.io with the workflow's own token.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: api-node
-            context: backend-node
-          - name: dashboard
-            context: dashboard
-          - name: woo-mcp
-            context: mcp-servers/woo-mcp
-          - name: notes-mcp
-            context: mcp-servers/notes-mcp
-          - name: everything-mcp
-            context: mcp-servers/everything-mcp
-          - name: store-chart
-            context: charts/store-woocommerce
+          # ghcr: the image name values-prod.yaml / values.yaml expect under ghcr.io/<owner>/.
+          - { name: api-node, context: backend-node, ghcr: store-platform-api }
+          - { name: dashboard, context: dashboard, ghcr: store-platform-dashboard }
+          - { name: woo-mcp, context: mcp-servers/woo-mcp, ghcr: woo-mcp }
+          - { name: notes-mcp, context: mcp-servers/notes-mcp, ghcr: notes-mcp }
+          - { name: everything-mcp, context: mcp-servers/everything-mcp, ghcr: everything-mcp }
+          - { name: store-chart, context: charts/store-woocommerce, ghcr: store-chart }
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t "store-platform/${{ matrix.name }}:ci" "${{ matrix.context }}"
+      - name: Publish to GHCR (version tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER,,}/${{ matrix.ghcr }}:${VERSION#v}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+          docker tag "store-platform/${{ matrix.name }}:ci" "$image"
+          docker push "$image"
+          # The digest to pin in values-prod.yaml (DESIGN §13.4).
+          echo "### $image" >> "$GITHUB_STEP_SUMMARY"
+          docker inspect --format '{{index .RepoDigests 0}}' "$image" >> "$GITHUB_STEP_SUMMARY"

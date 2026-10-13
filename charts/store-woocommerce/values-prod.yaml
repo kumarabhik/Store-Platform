@@ -19,6 +19,10 @@ existingSecret: store-default-credentials
 
 storageClassName: local-path
 
+# Nightly backup (Secret backup-s3 is copied in by scripts/deploy.sh from the backup store).
+backup:
+  enabled: true
+
 woocommerce:
   version: ""                     # pin to the version you tested locally before going live
 

@@ -29,8 +29,9 @@ const REFRESH_MS = 5_000;
 // datetime-local gives local time without a zone; the API wants ISO-8601 (UTC).
 const toIso = (local: string) => (local ? new Date(local).toISOString() : "");
 
-function query(f: Filters, beforeId?: number) {
-  const q = new URLSearchParams({ limit: String(PAGE) });
+// The same filters drive the table (/api/audit, paged) and the CSV export (/api/audit.csv).
+function query(f: Filters, beforeId?: number, path = "/api/audit") {
+  const q = new URLSearchParams(path === "/api/audit" ? { limit: String(PAGE) } : {});
   const add = (k: string, v: string) => v.trim() && q.set(k, v.trim());
   add("user", f.user);
   add("server", f.server);
@@ -40,7 +41,7 @@ function query(f: Filters, beforeId?: number) {
   add("from", toIso(f.from));
   add("to", toIso(f.to));
   if (beforeId) q.set("before_id", String(beforeId));
-  return `/api/audit?${q}`;
+  return `${path}?${q}`;
 }
 
 export function AuditPage({ api, user }: { api: Api; user: AuthUser }) {
@@ -52,6 +53,8 @@ export function AuditPage({ api, user }: { api: Api; user: AuthUser }) {
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [open, setOpen] = useState<number | null>(null);
   // Once older pages are loaded, the cursor belongs to them, not to the auto-refreshed first page.
   const pagedRef = useRef(false);
@@ -103,6 +106,35 @@ export function AuditPage({ api, user }: { api: Api; user: AuthUser }) {
     }
   }
 
+  // Downloads the CSV through `api` (it carries the session header, which a plain link can't).
+  async function exportCsv() {
+    setExporting(true);
+    try {
+      const res = await api(query(filters, undefined, "/api/audit.csv"));
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { message?: string } | null;
+        throw new Error(body?.message ?? `Audit export failed with HTTP ${res.status}`);
+      }
+      const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "audit.csv";
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(url);
+      const count = res.headers.get("x-audit-rows") ?? "?";
+      setNotice(
+        res.headers.get("x-audit-truncated") === "true"
+          ? `Exported the newest ${count} rows only. Narrow From/To to export the rest.`
+          : `Exported ${count} rows to ${name}.`,
+      );
+    } catch (err) {
+      setError(errorText(err, "The audit log could not be exported."));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const set = (patch: Partial<Filters>) => setDraft((current) => ({ ...current, ...patch }));
   const firstIds = new Set(rows.map((r) => r.id));
   const shown = [...rows, ...olderRows.filter((r) => !firstIds.has(r.id))];
@@ -121,6 +153,7 @@ export function AuditPage({ api, user }: { api: Api; user: AuthUser }) {
       </header>
 
       <Banner error={error} onClose={() => setError(null)} />
+      <Banner notice={notice} onClose={() => setNotice(null)} />
 
       <article className="card formCard">
         <div className="filterGrid">
@@ -178,6 +211,9 @@ export function AuditPage({ api, user }: { api: Api; user: AuthUser }) {
             }}
           >
             Clear
+          </button>
+          <button className="btn btnSecondary btnSmall" disabled={exporting} onClick={() => void exportCsv()} title="Applied filters, newest first">
+            {exporting ? "Exporting…" : "Export CSV"}
           </button>
         </div>
       </article>

@@ -1,0 +1,97 @@
+# Monitoring for the MCP gateway (DESIGN §13.5). Release "monitoring" in namespace "monitoring":
+# the only namespace platform-api's NetworkPolicy lets reach its metrics port (9464).
+
+# Our own pieces (templates/).
+gateway:
+  # Where platform-api runs, and the Service port name of its metrics.
+  namespace: platform
+  serviceSelector:
+    app: platform-api
+  metricsPort: metrics
+  scrapeInterval: 15s
+
+alerts:
+  # How long an upstream must be down before UpstreamDown fires (DESIGN: 5 min in production).
+  upstreamDownFor: 5m
+  # Share of failed tool calls (timeout, unreachable, tool_error) per server over 10 min.
+  errorRateThreshold: 0.1
+  # p95 tool call latency per server, seconds.
+  latencyP95Seconds: 5
+  # A nightly backup CronJob without a success for this long fires BackupMissing.
+  backupMaxAgeHours: 26
+
+# The upstream chart, trimmed for a single small node.
+kube-prometheus-stack:
+  fullnameOverride: kps
+  # minikube/k3s don't expose these control-plane components; scraping them only raises false alerts.
+  kubeEtcd: { enabled: false }
+  kubeControllerManager: { enabled: false }
+  kubeScheduler: { enabled: false }
+  kubeProxy: { enabled: false }
+  defaultRules:
+    rules:
+      etcd: false
+      kubeControllerManager: false
+      kubeSchedulerAlerting: false
+      kubeSchedulerRecording: false
+      kubeProxy: false
+
+  prometheus:
+    prometheusSpec:
+      retention: 3d
+      # Pick up ServiceMonitors and rules from any release, not only ones labelled for this chart.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      resources:
+        requests: { cpu: 100m, memory: 400Mi }
+        limits: { memory: 1Gi }
+
+  alertmanager:
+    alertmanagerSpec:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+    # No receiver yet (Slack/email would be a new external service, Rule 8); alerts are visible in
+    # the Alertmanager and Prometheus UIs.
+
+  grafana:
+    # Empty: the Grafana chart generates a password once and keeps it in Secret kps-grafana.
+    adminPassword: ""
+    # Grafana otherwise downloads plugins from the internet at every start, which made startup slow
+    # enough for the liveness probe to kill it (SYSTEM.md L39). We need no extra plugins.
+    grafana.ini:
+      plugins:
+        preinstall_disabled: true
+      # No calls home for update checks either: nothing in the cluster should need the internet.
+      analytics:
+        check_for_updates: false
+        check_for_plugin_updates: false
+    # The chart's 1 s readiness timeout failed ~9 times an hour on a busy single node and made
+    # Grafana answer 503 (SYSTEM.md L47).
+    readinessProbe:
+      httpGet: { path: /api/health, port: grafana }
+      timeoutSeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    resources:
+      requests: { cpu: 20m, memory: 128Mi }
+      limits: { memory: 384Mi }
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+
+  prometheusOperator:
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { memory: 256Mi }
+
+  kube-state-metrics:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+
+  prometheus-node-exporter:
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits: { memory: 64Mi }

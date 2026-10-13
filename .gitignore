@@ -61,3 +61,4 @@ graphify-out/
 
 # Ignore node_modules everywhere
 **/node_modules/
+rendered/

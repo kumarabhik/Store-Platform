@@ -1,0 +1,3 @@
+# minikube: defaults are fine (generated credentials, default StorageClass).
+storage:
+  size: 5Gi

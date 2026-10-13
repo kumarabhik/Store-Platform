@@ -180,6 +180,26 @@ describe("team: roles, invites, members, API keys", async () => {
     expect((await app.inject({ url: "/api/audit?outcome=nope", headers: as(a.token) })).statusCode).toBe(400);
   });
 
+  it("audit CSV export: same scoping and filters as the JSON API, with a header row", async () => {
+    const bobToken = auth.createSession(db, b.user.id);
+    const res = await app.inject({ url: "/api/audit.csv?user=alice@example.com", headers: as(bobToken) });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/csv");
+    expect(res.headers["content-disposition"]).toMatch(/^attachment; filename="audit-\d{8}-\d{6}\.csv"$/);
+    expect(res.headers["x-audit-truncated"]).toBe("false");
+    const lines = res.body.trimEnd().split("\r\n");
+    expect(lines[0]).toBe("id,ts,user_email,user_id,api_key_id,source,server_slug,tool_name,exposed_name,duration_ms,outcome,error,args_preview");
+    // Bob asked for Alice's rows and got only his own two.
+    expect(lines.slice(1).every((l) => l.includes(",bob@example.com,"))).toBe(true);
+    expect(lines).toHaveLength(3);
+    expect(res.headers["x-audit-rows"]).toBe("2");
+
+    const denied = await app.inject({ url: "/api/audit.csv?outcome=denied", headers: as(a.token) });
+    expect(denied.body.trimEnd().split("\r\n")).toHaveLength(2);
+    expect((await app.inject({ url: "/api/audit.csv" })).statusCode).toBe(401);
+    expect((await app.inject({ url: "/api/audit.csv?from=yesterday", headers: as(a.token) })).statusCode).toBe(400);
+  });
+
   it("promoting a second admin then lets the first step down", async () => {
     await app.inject({ method: "PATCH", url: `/api/members/${b.user.id}`, headers: as(a.token), payload: { role: "admin" } });
     const res = await app.inject({ method: "PATCH", url: `/api/members/${a.user.id}`, headers: as(a.token), payload: { role: "member" } });

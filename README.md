@@ -42,6 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\ops\up.ps1
 | `http://store.127.0.0.1.nip.io:8088` | Default WooCommerce store (`/wp-admin`, user `admin`) |
 | `http://store-<id>.127.0.0.1.nip.io:8088` | Stores created from the dashboard (bonus) |
 | `http://127.0.0.1:5173` | Vite dev server for dashboard work (same API through its `/api` proxy) |
+| `http://grafana.127.0.0.1.nip.io:8088` | Grafana: the "MCP Gateway" dashboard and alerts (user `admin`, password in Secret `monitoring/monitoring-grafana`) |
 
 Later: `ops\resume.ps1` after a reboot or sleep (port-forwards die with their pod, SYSTEM.md L6), and `ops\down.ps1` to stop. It keeps all data; `-DestroyData` wipes it.
 
@@ -64,19 +65,22 @@ Credentials for the LLM and admin tools go in the repo root `.env.local` (for ex
    claude mcp add --transport http team-gateway http://api.127.0.0.1.nip.io:8088/mcp --header "Authorization: Bearer mcpgw_…"
    ```
 
-   In Claude Code, `/mcp` should show the gateway with 22 tools: `woo__*`, `notes__*`, `everything__*`. Try *"What orders came in today?"* or *"List today's orders and save a follow-up note for each customer"* (two upstreams in one prompt).
+   In Claude Code, `/mcp` should show the tools of every enabled server: `woo__*`, `notes__*`, `everything__*`, and `store_<id>__*` for each provisioned store (34 for an admin with one extra store, 28 for a member: the tools that change orders or products are admin-only). Try *"What orders came in today?"* or *"List today's orders and save a follow-up note for each customer"* (two upstreams in one prompt).
 4. **Chat.** Before any tool that changes data, the chat shows an approval card (tool, arguments, reason) and waits for **Approve** or **Decline** (`CHAT_APPROVAL` in the values). The Chat page runs the same tools as you: *"Create a product called Linen Shirt priced 499 rupees"*, then find it on the storefront. Every tool call is a card, and each one lands in **Audit** under your name.
 5. **Place an order.** On the storefront, add a product to the cart and check out with **Cash on delivery**. The order appears in `/wp-admin` → WooCommerce → Orders, and in *"what orders came in today?"*.
 6. **Stores (bonus).** Create a store from the Stores page. It gets its own namespace, database, WooCommerce, MCP server and URL, and once it is Ready its tools appear as `store_<id>__*`. Ask the chat to *"compare today's orders in Anku Shop and Bharat Bazaar"*. Deleting a store removes its tools first, then everything else.
+7. **Audit.** Every tool call, including failures and declined approvals, with filters. **Export CSV** downloads the filtered rows (`GET /api/audit.csv`, newest 10 000; members get only their own rows).
 
 ## 3. Verify it
 
 | Command | Proves |
 |---|---|
-| `bash scripts/dod.sh` | The whole definition of done, end to end (16 checks: order, member key sees every server, orders today, two upstreams, chat creates a product, disable/kill/revoke, audit). Needs an admin and a member login, see the script header |
+| `ADMIN_TOKEN=… bash scripts/preflight.sh` | Read-only check before a demo: pods, new pods can start, API/dashboard, upstreams Connected, LLM model, backups recent, no alerts firing. [DEMO.md](DEMO.md) is the recording runbook |
+| `bash scripts/dod.sh` | The whole definition of done, end to end (19 checks: order, member key sees every server, orders today, two upstreams, admin-only tools hidden and refused, chat asks before creating a product, disable/kill/revoke, audit). Needs an admin and a member login, see the script header |
 | `bash scripts/verify-store.sh [--persistence]` | Storefront → cart → COD checkout → order in WooCommerce; with `--persistence`, deletes the WordPress and MariaDB pods and checks the order survives |
-| `bash scripts/verify-store-isolation.sh` | 36 real connections against the NetworkPolicies, ingress and egress, positive and negative. `NS=store-<a> REL=wc-<a> OTHER_ID=<b>` checks a provisioned store and store-to-store isolation (43) |
-| `bash scripts/test-backend.sh` | All backend tests (87) in Node 20; `npm --prefix backend-node test` runs the non-SQLite ones on the host |
+| `bash scripts/verify-store-isolation.sh` | 40 real connections against the NetworkPolicies, ingress and egress, positive and negative, incl. the backup store. `NS=store-<a> REL=wc-<a> OTHER_ID=<b>` also checks store-to-store isolation |
+| `bash scripts/restore-drill.sh [release] [namespace]` | Takes a fresh backup, restores it into a scratch database and compares orders and products with the live store |
+| `bash scripts/test-backend.sh` | All backend tests (113) in Node 20; `npm --prefix backend-node test` runs the non-SQLite ones on the host |
 | `npm --prefix mcp-servers/woo-mcp test`, `npm --prefix mcp-servers/notes-mcp test` | The MCP servers |
 | `npm --prefix dashboard run build` / `run lint` | The dashboard |
 
@@ -87,6 +91,8 @@ bash scripts/k3s-install.sh      # once: k3s (with Traefik) + helm
 # edit charts/*/values-prod.yaml: your domain (wildcard A record *.<domain> -> VPS IP), image tags
 bash scripts/deploy.sh           # checks values + Secrets, then installs the three charts with --atomic
 ```
+
+**Try the production path without a VPS:** `bash scripts/k3d-prod-test.sh` creates a local k3s cluster (k3d) on ports 80/443, fills `values-prod.yaml` like an operator would (in a scratch copy), creates the required Secrets and runs `deploy.sh` unchanged. Then run `dod.sh` and `verify-store-isolation.sh` against it (commands in the script header). Images for a real VPS come from GHCR: push a tag (`git tag v0.1.0 && git push --tags`) and CI publishes them.
 
 `deploy.sh` refuses to run while placeholder domains are left in the prod values, and prints the exact `kubectl create secret` command for every Secret that is still missing. Production never lets a chart generate credentials. Only the values files differ between local and production (SYSTEM_DESIGN.md has the table).
 
@@ -130,6 +136,11 @@ gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed H
 | Observability (#8) | Every failure names the server and the cause (API, dashboard, audit log); Prometheus metrics per server/tool/outcome, latency histogram, upstream up, on an in-cluster port (9464) | `gateway/metrics.ts`, `gateway/health.ts`, Servers page |
 | Upgrades and rollback (#9) | `--atomic` installs, rollback run live (revision 10 → back to 13), additive migrations | `scripts/deploy.sh`, section 4 |
 | VPS (#1, part) | Deploy script and Traefik prod values; not yet run on a real VPS | `scripts/deploy.sh`, `values-prod.yaml` |
+| Monitoring (real-world) | Prometheus + Grafana dashboard + 5 alert rules (gateway metrics, failed provisioning, `BackupMissing`); alert proven live | `charts/monitoring` |
+| Backups (real-world) | Nightly backups of every store and the platform DB to an in-cluster S3 store (Garage); each provisioned store has its own key and bucket (can't touch another store's backups), revoked on delete; restore drill passes | `charts/backups`, `backend-node/src/backupStore.ts`, `scripts/restore-drill.sh` |
+| Audit export (real-world) | CSV of the filtered audit log, same scoping as the page, spreadsheet-formula-safe | `team/routes.ts`, `gateway/audit.ts`, Audit page |
+| CI (real-world) | GitHub Actions: tests, lint, `helm lint`/`template` for 5 charts × local/prod, kubeconform schema check, image builds, GHCR publish on a `v*` tag | `.github/workflows/ci.yml` |
+| Merchant tools (real-world) | `sales_summary`, `list_low_stock`, `create_refund` (admin-only, asks for approval) | `mcp-servers/woo-mcp/src/tools.ts` |
 | Human approval (real-world) | The chat asks before every tool that changes data; declines are audited | `chat/approval.ts`, Chat page |
 | Tool permissions (#2) | Destructive tools admin-only by default; hidden from `tools/list` and refused on `tools/call`; per-tool "Who may use it" on the Servers page | `gateway/policy.ts`, `routes.ts`, Servers page |
 | Many tools (#4) | `GATEWAY_TOOL_MODE=search\|auto`: `gateway__search_tools` (BM25) + `gateway__call_tool`; -94% tool tokens per chat turn | `gateway/toolSearch.ts` |
@@ -161,6 +172,7 @@ Not built yet: OAuth on the gateway (#3), hosted MCP servers (#5), multiple API 
 | `backend-node/src/server.ts`, `auth.ts`, `db.ts` | Fastify app, sessions/passwords, SQLite schema and migrations |
 | `mcp-servers/woo-mcp`, `notes-mcp`, `everything-mcp` | The upstream MCP servers |
 | `dashboard/src/` | React app: `App.tsx` (auth + navigation), `pages/*` (one per page), `lib/*` |
-| `charts/platform`, `charts/store-woocommerce`, `charts/mcp-upstreams` | The three Helm charts; `values-local.yaml` / `values-prod.yaml` hold every environment difference |
+| `charts/platform`, `charts/store-woocommerce`, `charts/mcp-upstreams` | The three application charts; `values-local.yaml` / `values-prod.yaml` hold every environment difference |
+| `charts/monitoring`, `charts/backups` | Prometheus/Grafana/alerts, and the backup store (Garage) |
 | `ops/*.ps1` | Local up / resume / down (Windows) |
 | `scripts/` | `dod.sh`, `verify-store.sh`, `verify-store-isolation.sh`, `test-backend.sh`, `deploy.sh`, `k3s-install.sh`, demo helpers |

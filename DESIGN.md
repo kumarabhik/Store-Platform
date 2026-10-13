@@ -93,7 +93,7 @@ We studied production gateways (US, EU and China) and the academic literature, t
 | **OWASP MCP Top 10 (2025)** | MCP01 token mismanagement … MCP08 lack of audit … MCP09 shadow MCP servers | Checklist in §9.6 |
 | **MCP spec** (2025-06-18 → 2025-11-25 → **2026-07-28**) | Token passthrough **forbidden**; servers MUST validate `Origin`; 2026-07-28 removes sessions and `initialize` (stateless) | §6 protocol design, §8.3 no passthrough |
 
-Links are listed in §13.
+Links are listed in §14.
 
 ---
 
@@ -424,7 +424,7 @@ Based on RAG-MCP (retrieve, then expose) and Nacos MCP Router (`search_mcp_serve
 | **Servers**: list with status pill (Connected/Unreachable/Disabled), last error, latency, tools (expand), add/edit/disable/delete, "test connection" | full | read-only list of names and tools (no URLs or credentials) |
 | **Members**: invite (email + role), change role, disable user | full | — |
 | **API keys**: create (shown once, copy button, ready-made `claude mcp add …` command), list (prefix, created, last used), revoke | all keys | own keys |
-| **Audit log**: table with filters (user, server, tool, outcome, time), auto-refresh | all | own rows |
+| **Audit log**: table with filters (user, server, tool, outcome, time), auto-refresh, **Export CSV** (`GET /api/audit.csv`: same filters and scoping, newest 10 000 rows, cells that would run as spreadsheet formulas prefixed with `'`; compliance reviews ask for a file, not screenshots) | all | own rows |
 | **Chat**: messages + collapsible tool-call cards | ✓ | ✓ |
 | **Stores** (bonus): create/delete, status, URL, created time | ✓ | own |
 | **Connect**: gateway URL + per-client snippets (Claude Code, Cursor, Inspector) | ✓ | ✓ |
@@ -629,17 +629,132 @@ To add:
 ---
 
 ## 12. Testing strategy
-| Level | What | Tool |
+**As built.** Every layer has its own check, and CI runs the automated ones on every push (`.github/workflows/ci.yml`).
+
+| Level | What it proves | How | Count |
+|---|---|---|---|
+| Unit | Name prefixing and cleaning, policy rules, key hashing, SSRF classifier, OAuth 1.0a signer (vectors from WooCommerce's own PHP), backoff, BM25 search, metrics, approval rules | vitest | backend 104, woo-mcp 23, notes-mcp 6 |
+| Gateway integration | Three real HTTP MCP upstreams (ok / slow / dead) behind the real registry, health checker, pool, core and `/mcp`: list, route, timeout, dead upstream, policy, pinning, search mode, audit row per call | vitest + SDK servers (`gateway-core.test.ts`) | part of 104 |
+| Database | Migrations upgrade an old DB without losing rows; registry, keys, invites, audit scoping, store registration | vitest on SQLite (Linux/Node 20; `scripts/test-backend.sh` on Windows) | part of 104 |
+| Network isolation | Every NetworkPolicy, ingress and egress, with real connections, including negative tests | `scripts/verify-store-isolation.sh` | 37 (+7 with a second store) |
+| Store | Storefront checkout with cash on delivery; order survives pod restarts | `scripts/verify-store.sh [--persistence]` | — |
+| End to end (definition of done) | Two users, external client and chat, permissions, approvals, disable/kill/revoke, audit | `scripts/dod.sh` (curl) | 19 |
+| Packaging | Every chart lints and renders with local and prod values; every image builds | CI (`helm lint`/`template`, `docker build`) | 6 renders, 6 images |
+| Manual | Every dashboard page in a browser as admin and member; Claude Code against the gateway | owner, before recording | — |
+
+## 13. Production-readiness plan (P10, before the 2026-10-26 submission)
+
+The required work, the bonus and most stand-outs are built and verified (ROADMAP). This section designs the remaining steps that turn the platform from "works on a laptop" into something a team could run. Each step keeps the invariants in SYSTEM.md §1 and ends with a check that proves it.
+
+### 13.1 Principles for this phase
+- **Never break the demo.** After every step: backend tests, `helm lint` local + prod, `scripts/dod.sh`, `scripts/verify-store-isolation.sh`. CI runs the first two on every push.
+- **One step at a time, smallest verifiable change first.** A half-finished step is reverted, not left in.
+- **Additive only** for data (I10) and for configuration (old values keep working).
+- **New services need the owner's OK first** (AGENTS.md Rule 8). The table marks them.
+- **Feature freeze on 2026-10-22.** After that only fixes and docs, then rehearse, record and submit.
+
+### 13.2 Schedule and status
+
+| When | Step | Status | Needs owner |
+|---|---|---|---|
+| Oct 11–12 | CI on GitHub Actions (tests, lint, Helm, image builds) | **done**: run 38129313617, 12/12 jobs | — |
+| Oct 13–14 | Human approval for risky tool calls in the chat (§7.4.1) | **done**: live approve/decline, `dod.sh` 19/19 | approved |
+| Oct 15–16 | Postgres instead of SQLite, then 2 API replicas (§13.3) | planned, not approved yet | yes: new service |
+| Oct 17–18 | VPS + HTTPS (§13.4) | planned | yes: VPS + domain |
+| Oct 19 | Prometheus + Grafana + alerts (§13.5) | **done**: alert fired and resolved live | approved |
+| Oct 20–21 | Backups + restore drill (§13.6); merchant tools (§13.7) | **done**: drill passed on two stores; 3 tools live | approved (Garage) |
+| Oct 22 | **Feature freeze**: fix, update docs | — | — |
+| Oct 23–24 | Rehearse and record the demo video (two takes) | — | owner |
+| Oct 25 | Submit, one day early | — | owner |
+
+### 13.3 Postgres instead of SQLite, then two API replicas
+**Why:** SQLite on a ReadWriteOnce volume pins the API to exactly one pod (`Recreate`), so every deploy or crash is downtime. It's the first thing a production reviewer flags (G9).
+
+**Design**
+- **Database:** our own `postgres` StatefulSet in the platform chart, official `postgres:17` image, PVC, startup/readiness/liveness probes, non-root (uid 999), resources, NetworkPolicy admitting only `platform-api`. The password comes from a chart-generated Secret (`lookup` + `keep`) locally and `existingSecret` in production, the same pattern as the store chart. *Alternative:* the CloudNativePG operator (failover, PITR). Better for real production, but it's another controller to run and explain; noted as the next step after submission.
+- **Code:** today every module calls `better-sqlite3` synchronously. Rewriting it on the raw `pg` driver would touch every query twice (sync → async, SQL dialect). Instead, add **Kysely** (a typed SQL query builder) with its SQLite and Postgres dialects, and move module by module (`db.ts` migrations, then gateway, team, chat, provisioner). The same code runs on both; `DATABASE_URL` picks the dialect, so local dev and the existing tests can stay on SQLite while CI also runs every test against Postgres (a `postgres` service container).
+- **Schema:** the same tables. SQLite specifics are replaced: `datetime('now')` → a timestamp default, `json_each` → `jsonb` functions, `insert or ignore` → `on conflict do nothing`.
+- **Data move:** a one-off `scripts/migrate-sqlite-to-postgres.ts` copies every table in dependency order and prints row counts from both sides; it refuses to run if the target isn't empty.
+- **Two replicas, and what changes when there is more than one pod:**
+
+| Shared state today | With two replicas |
+|---|---|
+| Reconciler | Already guarded by the DB leader lock (`leader` table): one replica reconciles |
+| Health checker and seeding | Run only on the leader, so upstreams aren't probed twice |
+| Pending chat approvals (in memory) | A `chat_approvals` table; the waiting stream polls it, so the "Approve" request can reach either pod |
+| Per-key / per-IP rate limits (in memory) | Stay per pod (an effective limit of 2×), documented; a shared limiter (Postgres or Redis) is a later step |
+| Metrics (in memory) | Per pod; Prometheus sums across pods |
+
+- **Rollout:** `RollingUpdate` with `maxUnavailable: 0`, a PodDisruptionBudget (`minAvailable: 1`), and the gateway stays stateless (§6.1).
+
+**Verification:** all backend tests on SQLite and on Postgres in CI; `dod.sh` with 2 replicas; delete one API pod in the middle of a chat and a provisioning run, and both finish; row counts match after the data move.
+
+### 13.4 Production on a VPS with HTTPS
+**Why:** a reviewer can open a real URL, and production-only differences get exercised instead of described.
+
+**Design**
+- **Host:** one Linux VPS (4 GB RAM, 2 vCPU) with k3s and its built-in Traefik; `scripts/k3s-install.sh`, then `scripts/deploy.sh` (already written and tested up to its preflight checks).
+- **DNS:** a wildcard `*.<domain>` A record to the VPS, so `dashboard.`, `api.`, `store.` and every `store-<id>.` resolve without DNS changes per store.
+- **TLS:** cert-manager with a Let's Encrypt ClusterIssuer and **HTTP-01 per host**; every Ingress, including each provisioned store's, carries the issuer annotation. *Why not one wildcard certificate:* that needs DNS-01 and an API token for the DNS provider in the cluster; per-host HTTP-01 needs no credentials and stays well inside Let's Encrypt's limits.
+- **Images:** CI pushes to GHCR (`ghcr.io/kumarabhik/*`) on a version tag, using the workflow's own token, and `values-prod.yaml` pins **digests**, not just tags.
+- **Host hardening:** only ports 22/80/443 open, SSH keys only, automatic security updates.
+
+**Verification:** `dod.sh` run against the public URLs; HTTPS on every host (with an SSL Labs check); `deploy.sh` rerun is a no-op; `helm rollback` once on the VPS.
+
+**As built so far (no VPS yet):** `scripts/k3d-prod-test.sh` runs the production path on a local k3s cluster (k3d) serving ports 80/443: it fills `values-prod.yaml` the way an operator would (domain, image names) in a scratch copy, creates the Secrets the preflight lists, and runs `deploy.sh` unchanged. Result: all releases deployed on Traefik and `local-path`, `dod.sh` 19/19 and the isolation suite 40/40 on k3s. What it can't show is public DNS and Let's Encrypt; Traefik serves its default certificate. The CI `images` job pushes all six images to `ghcr.io/<owner>/…` on a `v*` tag, which is what a VPS pulls.
+
+### 13.5 Observability: Prometheus, Grafana, alerts
+**Why:** the metrics already exist (§S8, port 9464); without a scraper and alerts nobody would notice a dead upstream at night.
+
+**Design**
+- The `kube-prometheus-stack` chart in namespace `monitoring` (the namespace the API's NetworkPolicy already admits), trimmed for a small node: short retention (3 days) and the bundled node rules kept, extra components off.
+- A `ServiceMonitor` for `platform-api` port `metrics` (in the platform chart, enabled by a value).
+- A Grafana dashboard stored in the repo as JSON: calls per second by server, error rate by outcome, p95 latency per tool (from the histogram), upstream up/down, stores by status.
+- Alert rules (`PrometheusRule`): `UpstreamDown` (`mcp_upstream_up == 0` for 5 min), `ToolErrorRateHigh` (non-`ok` over 10 % for 10 min), `GatewayLatencyHigh` (p95 over 5 s for 10 min), `StoreProvisioningFailed` (failed counter increases).
+
+**Verification:** scale `notes-mcp` to 0 and watch `UpstreamDown` fire, then resolve; the dashboard shows the `dod.sh` traffic.
+
+**As built** (`charts/monitoring`): the alert is named `MCPUpstreamDown` and waits 1 min locally (5 min in production) so a demo can show it fire. Grafana's plugin preinstall is off: it downloaded plugins from the internet on every start, slow enough for the liveness probe to kill it (SYSTEM.md L39). The ServiceMonitor lives in this chart, so the platform chart never needs the Prometheus CRDs; it needed a label on the `platform-api` Service (L41). Alertmanager has no receiver yet: Slack or email would be a new external service. A fifth rule, `BackupMissing`, fires when a `*-backup` CronJob has had no success for 26 h (kube-state-metrics' `kube_cronjob_status_last_successful_time`); added after one night's backups silently never started (SYSTEM.md L46). Grafana's readiness timeout is 5 s instead of the chart's 1 s (L47).
+
+### 13.6 Backups and a restore drill
+**Why:** a shop that loses its orders is a real incident; a backup that was never restored is not a backup.
+
+**Design**
+- **Store databases:** a CronJob in every store namespace (part of the store chart): `mariadb-dump --single-transaction` → gzip → object storage (any S3-compatible bucket; credentials in a Secret, never in values), 7 daily copies kept. The store's NetworkPolicy gets one egress rule for it.
+- **Platform database:** the same with `pg_dump` (after §13.3).
+- **Restore drill:** `scripts/restore-drill.sh` restores the latest dump into a scratch namespace, starts WordPress against it, compares order and product counts with the live store, and deletes the scratch namespace. Run once and recorded in ROADMAP with the numbers.
+- The legacy, request-time backup feature (behind `FEATURE_LEGACY_SAAS`) stays frozen; scheduled backups replace it.
+
+**Verification:** the drill passes; a deliberately deleted product is back after a restore.
+
+**As built** (`charts/backups`, `scripts/backup-secret.sh`, `scripts/restore-drill.sh`):
+- **Garage instead of MinIO.** MinIO no longer publishes images (Docker Hub denies the pull, quay.io needs a login; SYSTEM.md L40). Garage is a small S3-compatible server; its admin API is driven by an idempotent bootstrap Job (layout, bucket, key import), because its image has no shell.
+- **No SDK for uploads:** `curl --aws-sigv4` signs the S3 PUT. Retention needs no cleanup job: files are named `Mon`…`Sun` plus `latest`, so each weekday overwrites its own file.
+- **Platform DB:** better-sqlite3's online `backup()` in the API's own image, so the copy is consistent while the API keeps writing.
+- **The drill restores at the database level** (a scratch MariaDB, counts compared with the live store) rather than starting a whole WordPress; it proves the dump is complete and loadable, which is what fails in practice.
+- **A key and a bucket per store** (`backend-node/src/backupStore.ts`, called by the provisioner). Why: with one shared upload key, a compromised store namespace could overwrite every other store's backups. On provisioning, the provisioner asks Garage's admin API for a key and a bucket both named `store-<id>`, allows that key on that bucket only, and writes them to the store's `backup-s3` Secret. It is idempotent (an existing key is found by name and reused), so retries and re-installs don't pile up keys. Deleting a store revokes the key and keeps the bucket, so the last backups outlive the store. The admin port (3903) is open only to the bootstrap job and platform-api. Proven live: a store's key reads its own bucket (200) and gets 403 reading or writing the shared bucket; after a delete the key is gone and the bucket is kept.
+- **Residual risk:** `store-default` (installed by Helm, not the provisioner) and the platform DB still share the bootstrap key (THREAT_MODEL).
+- **Watched:** the `BackupMissing` alert (§13.5) and `scripts/preflight.sh` catch backups that silently didn't run.
+
+### 13.7 Merchant tools a shop owner actually asks for
+New tools in woo-mcp, through the WooCommerce REST API like the others (§7.1):
+
+| Tool | Answers | Annotations, so S2 and approvals apply automatically |
 |---|---|---|
-| Unit | name parsing/prefixing, policy, key hashing, SSRF classifier, OAuth1 signer (RFC 5849 test vectors), backoff calculator | `node --test` / vitest |
-| Contract | woo-mcp against a real WP in kind/minikube | script `scripts/test-woo-mcp.sh` |
-| Gateway integration | spin up 2 fake upstreams (1 slow, 1 dead), assert list/call/timeout/audit | vitest + SDK in-process servers |
-| E2E (definition of done) | `scripts/dod.sh` runs every DoD step with curl + MCP Inspector CLI, printing PASS/FAIL | bash |
-| Manual demo | `scripts/demo.md` checklist | — |
+| `sales_summary(from, to)` | "How much did I sell this week?" (order count, revenue, top products), in the store timezone | read-only |
+| `list_low_stock(threshold)` | "What's about to run out?" | read-only |
+| `create_refund(order_id, amount, reason)` | Refund an order, fully or partly | destructive: admin-only (S2) and asks for approval in the chat (P10) |
 
----
+**Verification:** unit tests with recorded WooCommerce responses; live calls against the default store; a member doesn't see `create_refund`.
 
-## 13. References
+**As built:** `sales_summary` counts only sales statuses (processing, completed, on-hold), adds money in cents, and reads at most 10 pages of 100 orders (it says `truncated: true` beyond that). `create_refund` sends `api_refund: false`: WooCommerce records the refund without calling a payment gateway, which is right for cash on delivery. No gateway change was needed for permissions or approvals: the tools' annotations drive both.
+
+### 13.8 After the submission (not in this plan)
+- Split the reconciler into its own `platform-controller` Deployment, so the internet-facing pod no longer holds namespace-creating RBAC (§4.1).
+- CloudNativePG (failover, point-in-time recovery) instead of a single Postgres pod.
+- OAuth on the gateway (S3), hosted MCP servers by image (S5), embeddings for tool search, a shared rate limiter.
+
+## 14. References
 - MCP specification & changelog (2026-07-28): https://modelcontextprotocol.io/specification/latest/changelog
 - MCP TypeScript SDK (stateless Streamable HTTP): https://ts.sdk.modelcontextprotocol.io/v2/serving/sessions-state-scaling.html
 - Hou et al., *MCP: Landscape, Security Threats, and Future Research Directions*: https://arxiv.org/abs/2503.23278

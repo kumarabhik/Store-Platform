@@ -1,0 +1,76 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default deny for the backup store (DESIGN §10.2.2). Garage needs no egress at all (one node).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# S3 uploads/downloads: only from backup job pods, which carry this label in whatever namespace
+# they run (store namespaces, platform, the restore drill). The admin API: only the bootstrap job.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "backups.selectorLabels" (dict "ctx" . "component" "garage") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              store-platform/backup-client: "true"
+      ports:
+        - { port: 3900, protocol: TCP }
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "backups.selectorLabels" (dict "ctx" . "component" "bootstrap") | nindent 14 }}
+        # The provisioner creates and revokes each store's own key and bucket (DESIGN §13.6).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.platformNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.platformApiPodLabels | nindent 14 }}
+      ports:
+        - { port: 3903, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-bootstrap
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "backups.selectorLabels" (dict "ctx" . "component" "bootstrap") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "backups.selectorLabels" (dict "ctx" . "component" "garage") | nindent 14 }}
+      ports:
+        - { port: 3903, protocol: TCP }
+{{- end }}

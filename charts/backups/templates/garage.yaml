@@ -1,0 +1,126 @@
+# One Garage node. Secrets come from env (GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN), never from the
+# config file, so the ConfigMap holds nothing sensitive.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "sqlite"
+    replication_factor = 1
+    rpc_bind_addr = "[::]:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+
+    [s3_api]
+    s3_region = "{{ .Values.region }}"
+    api_bind_addr = "[::]:3900"
+    root_domain = ".s3.garage"
+
+    [admin]
+    api_bind_addr = "[::]:3903"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "backups.selectorLabels" (dict "ctx" . "component" "garage") | nindent 4 }}
+  ports:
+    - { name: s3, port: 3900, targetPort: s3 }
+    - { name: admin, port: 3903, targetPort: admin }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: garage
+  labels:
+    {{- include "backups.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+spec:
+  serviceName: garage
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "backups.selectorLabels" (dict "ctx" . "component" "garage") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "backups.selectorLabels" (dict "ctx" . "component" "garage") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # hostPath-style storage ignores fsGroup (SYSTEM.md L17): give the volume to uid 1000, once.
+        - name: volume-permissions
+          image: {{ .Values.busyboxImage }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          command: ["sh", "-c", "mkdir -p /var/lib/garage/meta /var/lib/garage/data && chown -R 1000:1000 /var/lib/garage"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"], add: ["CHOWN"] }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/garage }
+      containers:
+        - name: garage
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          args: ["/garage", "-c", "/etc/garage/garage.toml", "server"]
+          env:
+            - name: GARAGE_RPC_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "backups.secretName" . }}, key: rpc-secret } }
+            - name: GARAGE_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "backups.secretName" . }}, key: admin-token } }
+          ports:
+            - { name: s3, containerPort: 3900 }
+            - { name: rpc, containerPort: 3901 }
+            - { name: admin, containerPort: 3903 }
+          # The admin /health answers 503 until the layout is set (bootstrap job), so readiness uses
+          # the S3 port; liveness only checks the process listens.
+          readinessProbe:
+            tcpSocket: { port: s3 }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: rpc }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/garage, readOnly: true }
+            - { name: data, mountPath: /var/lib/garage }
+      volumes:
+        - name: config
+          configMap: { name: garage-config }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.storageClassName }}
+        storageClassName: {{ .Values.storage.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size | quote }}

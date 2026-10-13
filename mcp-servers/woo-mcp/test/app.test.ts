@@ -36,7 +36,7 @@ describe("/mcp bearer token", () => {
     const res = await app.inject({ method: "POST", url: "/mcp", headers: { ...headers, authorization: `Bearer ${token}` }, payload: listTools });
     expect(res.statusCode).toBe(200);
     expect(res.headers["mcp-session-id"]).toBeUndefined();
-    expect(res.json().result.tools).toHaveLength(6);
+    expect(res.json().result.tools).toHaveLength(9);
   });
 
   it("answers GET /mcp with 405", async () => {
