@@ -119,11 +119,14 @@ jobs:
       - name: Lint and render every chart with both environments' values
         run: |
           set -euo pipefail
-          # monitoring wraps kube-prometheus-stack (pinned in Chart.yaml/Chart.lock).
+          # monitoring wraps kube-prometheus-stack, cert-manager wraps jetstack's chart (both pinned
+          # in Chart.yaml/Chart.lock).
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add jetstack https://charts.jetstack.io
           helm dependency build charts/monitoring
+          helm dependency build charts/cert-manager
           mkdir -p rendered
-          for chart in platform store-woocommerce mcp-upstreams monitoring backups; do
+          for chart in platform store-woocommerce mcp-upstreams monitoring backups cert-manager; do
             for env in local prod; do
               echo "::group::$chart ($env)"
               helm lint "charts/$chart" -f "charts/$chart/values.yaml" -f "charts/$chart/values-$env.yaml"
@@ -132,11 +135,14 @@ jobs:
             done
           done
       # Every rendered object checked against the real Kubernetes API schema (wrong field names,
-      # wrong types, unknown fields with -strict), including the Prometheus CRDs.
+      # wrong types, unknown fields with -strict), including the Prometheus and cert-manager CRDs.
+      # Skipped: only the kind CustomResourceDefinition itself (cert-manager ships its CRDs as
+      # templates), which the Kubernetes schema set has no schema for; resources of those kinds,
+      # like our ClusterIssuer, are still validated against the CRDs catalog.
       - name: Validate rendered manifests (kubeconform)
         run: |
           docker run --rm -v "$PWD/rendered:/m" ghcr.io/yannh/kubeconform:v0.6.7 \
-            -strict -summary -kubernetes-version 1.31.0 \
+            -strict -summary -kubernetes-version 1.31.0 -skip CustomResourceDefinition \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             /m

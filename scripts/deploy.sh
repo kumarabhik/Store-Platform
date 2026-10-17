@@ -21,9 +21,10 @@ command -v kubectl >/dev/null || fail "kubectl not found (run scripts/k3s-instal
 command -v helm >/dev/null || fail "helm not found (run scripts/k3s-install.sh first)"
 kubectl get nodes >/dev/null || fail "cannot reach the cluster with KUBECONFIG=$KUBECONFIG"
 
-# Placeholders left in the prod values would publish the platform under someone else's domain.
+# Placeholders left in the prod values would publish the platform under someone else's domain
+# (and register the Let's Encrypt account with an address nobody reads).
 if grep -nE "^[^#]*(your-vps-domain\.com|example\.com)" charts/*/values-prod.yaml; then
-  fail "replace the placeholder domains above in charts/*/values-prod.yaml first"
+  fail "replace the placeholder domains and email above in charts/*/values-prod.yaml first"
 fi
 
 # Production never lets a chart invent credentials (values-prod.yaml sets existingSecret), so they
@@ -57,8 +58,14 @@ install() {  # install <release> <chart> <namespace>
     --atomic --timeout "$TIMEOUT"
 }
 
-# Same order as ops/up.ps1. The gateway seeds its upstreams with backoff retries, so it doesn't
-# matter that the store and upstreams come up after it (DESIGN §10.1).
+# cert-manager first: its ClusterIssuer must exist before any Ingress names it, or the first
+# certificates wait for the next resync (DESIGN §13.4).
+helm repo add jetstack https://charts.jetstack.io --force-update >/dev/null
+helm dependency build charts/cert-manager >/dev/null
+install cert-manager cert-manager cert-manager
+
+# Then the same order as ops/up.ps1. The gateway seeds its upstreams with backoff retries, so it
+# doesn't matter that the store and upstreams come up after it (DESIGN §10.1).
 install platform platform platform
 install store-default store-woocommerce store-default
 install upstreams mcp-upstreams mcp-servers
@@ -75,4 +82,5 @@ helm list -A
 echo
 echo "Dashboard: https://dashboard.${domain}"
 echo "Gateway:   https://api.${domain}/mcp"
+echo "Certificates: kubectl get certificates -A (READY True within a minute or two once DNS points here)"
 echo "Next: open the dashboard and sign up; the first account becomes the admin."

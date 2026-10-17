@@ -1,0 +1,41 @@
+# TLS certificates for the VPS (DESIGN §13.4). Release "cert-manager" in namespace "cert-manager",
+# installed by scripts/deploy.sh before the other charts. Not installed locally (minikube is HTTP).
+
+# The ClusterIssuer that every production Ingress names in `cert-manager.io/cluster-issuer`
+# (platform, store-woocommerce, monitoring values-prod.yaml).
+issuer:
+  enabled: false
+  name: platform-tls
+  # acme: Let's Encrypt, HTTP-01 per host (no DNS provider token in the cluster).
+  # selfSigned: for scripts/k3d-prod-test.sh, where Let's Encrypt can't reach the cluster.
+  type: acme
+  acme:
+    # Let's Encrypt sends expiry warnings here.
+    email: ""
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # The solver's temporary Ingress must be served by the same controller as the real ones.
+    ingressClassName: traefik
+
+cert-manager:
+  # The CRDs come with the chart and stay when it is uninstalled (deleting them would delete
+  # every Certificate in the cluster).
+  crds:
+    enabled: true
+    keep: true
+  # Requests + memory limits on every pod; no CPU limits (CFS throttling, DESIGN §10.2).
+  # The chart already runs everything as non-root with a read-only root filesystem.
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  webhook:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  cainjector:
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  startupapicheck:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 64Mi }

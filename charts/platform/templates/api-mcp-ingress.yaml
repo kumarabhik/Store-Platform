@@ -16,7 +16,8 @@ spec:
   tls:
     - hosts:
         - {{ printf "api.%s" .Values.global.baseDomain | quote }}
-      secretName: {{ .Values.global.tls.secretName | quote }}
+      # api.<domain>'s certificate, requested by the API Ingress (no issuer annotation here).
+      secretName: {{ include "platform.tlsSecret" (dict "ctx" . "name" (include "platform.apiName" .)) | quote }}
   {{- end }}
   rules:
     - host: {{ printf "api.%s" .Values.global.baseDomain | quote }}

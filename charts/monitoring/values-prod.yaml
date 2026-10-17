@@ -13,7 +13,7 @@ kube-prometheus-stack:
       enabled: true
       ingressClassName: traefik
       annotations:
-        cert-manager.io/cluster-issuer: letsencrypt-prod
+        cert-manager.io/cluster-issuer: platform-tls     # from charts/cert-manager
       hosts: [grafana.your-vps-domain.com]
       tls:
         - secretName: grafana-tls

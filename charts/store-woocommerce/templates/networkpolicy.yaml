@@ -175,4 +175,28 @@ spec:
               {{- include "store.selectorLabels" (dict "ctx" . "component" "wordpress") | nindent 14 }}
       ports:
         - { port: 80, protocol: TCP }
+{{- if .Values.ingress.tls.enabled }}
+---
+# cert-manager's HTTP-01 solver pod for the storefront host: reached only by the ingress
+# controller, on its fixed port; it connects nowhere (SYSTEM.md L58).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.fullname" . }}-acme-http01-solver
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - { port: 8089, protocol: TCP }
+  egress: []
+{{- end }}
 {{- end }}

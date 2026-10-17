@@ -63,3 +63,12 @@ is never written into values or the manifest.
 - name: DATABASE_URL
   value: "postgres://{{ .Values.postgres.user }}:$(DATABASE_PASSWORD)@{{ include "platform.postgresName" . }}:5432/{{ .Values.postgres.database }}"
 {{- end -}}
+
+{{/*
+TLS Secret for one Ingress: the shared global.tls.secretName if set, else "<name>-tls" so each
+host gets its own cert-manager Certificate (two Ingresses naming one Secret would fight over it).
+Call with (dict "ctx" . "name" "<ingress name>").
+*/}}
+{{- define "platform.tlsSecret" -}}
+{{ .ctx.Values.global.tls.secretName | default (printf "%s-tls" .name) }}
+{{- end -}}

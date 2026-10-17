@@ -8,7 +8,7 @@ Rules for this file (see [AGENTS.md](AGENTS.md)):
 - Add new items where they belong. Never delete items; strike through ~~like this~~ with a reason if dropped.
 - Design details live in [DESIGN.md](DESIGN.md) (section numbers given as §n). Lessons and gotchas go into [SYSTEM.md](SYSTEM.md).
 
-Last reviewed: 2026-10-15
+Last reviewed: 2026-10-17
 
 ---
 
@@ -219,7 +219,7 @@ Not required by the assignment; they make the platform closer to something a rea
 ### S1 VPS deployment
 - [x] `scripts/k3s-install.sh` (k3s + helm; no ingress-nginx, Traefik is built in) and `scripts/deploy.sh`; `values-prod.yaml` on Traefik. Placeholder domain until a VPS exists
 - [x] Switch prod ingress class to `traefik` (ingress-nginx EOL). Verified on k3s: every Ingress (dashboard, api, /mcp, store, grafana) served by Traefik over HTTP and HTTPS. Earlier note: Done in values: platform `values-prod.yaml` now uses `traefik` like the store chart, NetworkPolicies allow kube-system, `k3s-install.sh` no longer installs ingress-nginx. Proof: `helm template` prod. Not yet run on k3s
-- [ ] cert-manager + Let's Encrypt
+- [~] cert-manager + Let's Encrypt. `charts/cert-manager` (jetstack v1.21.2 pinned, requests + memory limits, ClusterIssuer `platform-tls` as a post-install hook), installed first by `deploy.sh`; one TLS Secret per host, issuer annotation only on the Ingress that owns the host; HTTP-01 solver NetworkPolicy in platform and store charts (SYSTEM.md L58); in CI (lint, render, kubeconform). Proof (k3d, 2026-10-17, issuer switched to `selfSigned` by `k3d-prod-test.sh`): `deploy.sh` installed cert-manager with --atomic, `platform-tls` Ready, Certificates `platform-api-tls`, `platform-dashboard-tls`, `store-default-tls` READY True within 20 s; a rerun upgraded cert-manager, platform, store, upstreams, backups in place. Not verified: Let's Encrypt over HTTP-01 and the solver policy (needs public DNS, i.e. the VPS), and Grafana's certificate: the monitoring release timed out in all three runs because the laptop stalled with minikube running alongside (node `Ready` re-set, every probe timing out). Rerun `k3d-prod-test.sh` with minikube stopped
 - [ ] Deployed and demoed on a real VPS (needs a VPS + domain). The same production path is proven on k3s locally (`scripts/k3d-prod-test.sh`); images reach a VPS through the CI `images` job, which pushes to GHCR on a `v*` tag
 ### S2 Tool permissions
 - [x] `tool_policies` + defaults (destructive tools need admin) + UI. Default rule: `destructiveHint` → admin; `woo` (Helm seed `tool_policies`) and every `store_<id>` get `create_product`/`update_order_status` admin-only when first registered (later admin choices are never undone). Admin UI: "Who may use it" per tool on the Servers page (`PUT /api/servers/:id/tools/:tool/policy`). Owner approved admin-only defaults (2026-10-11, Rule 8). Proof (live): member 24 tools / no write tools, admin 28; relax → member sees it, back to admin → hidden; member PUT → 403

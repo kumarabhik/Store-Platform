@@ -1,0 +1,2 @@
+# minikube serves plain HTTP on nip.io hosts (README §1.1), so ops/up.ps1 does not install this
+# chart. The file exists so CI can lint and render every chart with both environments' values.

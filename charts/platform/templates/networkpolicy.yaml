@@ -191,4 +191,26 @@ spec:
         - { port: 5432, protocol: TCP }
     {{- end }}
 {{- end }}
+{{- if and .Values.global.tls.enabled .Values.global.tls.clusterIssuer }}
+---
+# cert-manager's HTTP-01 solver pods: Let's Encrypt fetches the challenge through the ingress
+# controller, which default-deny would otherwise stop at this namespace (SYSTEM.md L58).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: acme-http01-solver
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+      ports:
+        - { port: 8089, protocol: TCP }
+  egress: []
+{{- end }}
 {{- end }}

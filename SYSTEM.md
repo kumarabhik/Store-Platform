@@ -329,6 +329,13 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Fix:** `backup.enabled: true` in values-prod.yaml; the isolation check for the backup job now runs only where the CronJob exists.
 - **Carry forward:** a test that expects "open" finds missing features too, not just leaks.
 
+### L58 — Let's Encrypt on default-deny namespaces with shared TLS Secrets
+- **Symptom:** none yet; found while wiring cert-manager (S1), before any VPS run. Both would show as Certificates stuck `READY False`, with the Challenge reporting `wrong status code '404'` or a timeout.
+- **Cause:** (1) the api and dashboard Ingresses named one `wildcard-tls-secret`. cert-manager's ingress-shim makes one Certificate per Secret name, so two Ingresses with different hosts would fight over it, and a wildcard needs DNS-01 anyway. (2) HTTP-01 solver pods run in the Ingress's own namespace, and Traefik reaches them on :8089. Default-deny in `platform` and in every store namespace drops that.
+- **Fix:** one Secret per host (`platform-api-tls`, `platform-dashboard-tls`, `<store>-tls`). Only the Ingress that owns a host carries the issuer annotation; `platform-api-mcp` reuses `platform-api-tls` without it. A `acme-http01-solver` NetworkPolicy (ingress controller → :8089, no egress) goes in the platform and store charts whenever TLS is on.
+- **Where:** [charts/cert-manager](charts/cert-manager), `platform.tlsSecret` in [_helpers.tpl](charts/platform/templates/_helpers.tpl), the solver policies in both charts' `networkpolicy.yaml`.
+- **Carry forward:** a new namespace with default-deny and a TLS Ingress needs the same solver policy.
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)

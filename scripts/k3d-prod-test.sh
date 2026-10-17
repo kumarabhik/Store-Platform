@@ -43,6 +43,9 @@ tar --exclude=node_modules --exclude=dist --exclude='*.tgz' -cf - charts scripts
 sed -i "s/your-vps-domain\.com/$DOMAIN/g; s/example\.com/$DOMAIN/g" "$WORK"/charts/*/values-prod.yaml
 sed -i "s#ghcr.io/kumarabhik/store-platform-api:[^\"]*#store-platform/api-node:$TAG#; s#ghcr.io/kumarabhik/store-platform-dashboard:[^\"]*#store-platform/dashboard:$TAG#; s#ghcr.io/kumarabhik/store-chart:[^\"]*#store-platform/store-chart:$TAG#" "$WORK/charts/platform/values-prod.yaml"
 printf '\nwooMcp:\n  image: store-platform/woo-mcp:%s\n' "$TAG" >> "$WORK/charts/store-woocommerce/values-prod.yaml"
+# Let's Encrypt can't reach a laptop, so the same issuer name signs its own certificates here: the
+# cert-manager install, the issuer hook and one Certificate per Ingress host are still exercised.
+sed -i 's/^issuer:$/issuer:\n  type: selfSigned/' "$WORK/charts/cert-manager/values-prod.yaml"
 printf '\nnotes:\n  image: store-platform/notes-mcp:%s\neverything:\n  image: store-platform/everything-mcp:%s\n' "$TAG" "$TAG" >> "$WORK/charts/mcp-upstreams/values-prod.yaml"
 
 echo "==> Secrets (the commands deploy.sh prints; LLM key from .env.local if present)"

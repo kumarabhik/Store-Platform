@@ -2,13 +2,18 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "platform.apiName" . }}
+  {{- with .Values.global.tls.clusterIssuer }}
+  # cert-manager issues api.<domain>'s certificate for this Ingress; the -mcp Ingress reuses it.
+  annotations:
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.global.ingressClassName | quote }}
   {{- if .Values.global.tls.enabled }}
   tls:
     - hosts:
         - {{ printf "api.%s" .Values.global.baseDomain | quote }}
-      secretName: {{ .Values.global.tls.secretName | quote }}
+      secretName: {{ include "platform.tlsSecret" (dict "ctx" . "name" (include "platform.apiName" .)) | quote }}
   {{- end }}
   rules:
     - host: {{ printf "api.%s" .Values.global.baseDomain | quote }}

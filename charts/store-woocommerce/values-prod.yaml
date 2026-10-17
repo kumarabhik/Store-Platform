@@ -5,7 +5,7 @@ ingress:
   className: traefik              # built into k3s; ingress-nginx is end-of-life (SYSTEM.md G6)
   host: store.example.com
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: platform-tls     # from charts/cert-manager
   tls:
     enabled: true
 

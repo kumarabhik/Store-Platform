@@ -1,0 +1,31 @@
+{{- if .Values.issuer.enabled }}
+# A hook, not a normal resource: Helm checks every resource's kind against the cluster before it
+# installs anything, and the ClusterIssuer kind only exists once this release's CRDs are in.
+# Post-install hooks run after --wait saw the webhook ready; weight 10 runs after the chart's own
+# startupapicheck (weight 1), which waits until the webhook accepts requests.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.issuer.name }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  {{- if eq .Values.issuer.type "acme" }}
+  acme:
+    email: {{ required "issuer.acme.email is required for Let's Encrypt" .Values.issuer.acme.email | quote }}
+    server: {{ .Values.issuer.acme.server | quote }}
+    # The ACME account key; recreating the issuer on upgrade reuses it.
+    privateKeySecretRef:
+      name: {{ .Values.issuer.name }}-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: {{ .Values.issuer.acme.ingressClassName | quote }}
+  {{- else if eq .Values.issuer.type "selfSigned" }}
+  selfSigned: {}
+  {{- else }}
+  {{- fail (printf "issuer.type must be acme or selfSigned, got %q" .Values.issuer.type) }}
+  {{- end }}
+{{- end }}

@@ -559,6 +559,9 @@ Default upstream registration: platform-api reads `GATEWAY_SEED_SERVERS` (JSON f
 | everything-mcp | tcp | tcp | — | 20m / 64Mi | 256Mi |
 | wordpress | `/wp-login.php` | `/wp-login.php` | 30×10s | 100m / 256Mi | 768Mi |
 | mariadb | `healthcheck.sh --connect --innodb_initialized` | `healthcheck.sh --connect` | 30×10s | 100m / 256Mi | 1Gi |
+| cert-manager controller (prod) | — (the upstream chart has none) | `/livez` (healthz port) | — | 10m / 64Mi | 256Mi |
+| cert-manager webhook (prod) | `/healthz` | `/livez` | — | 10m / 32Mi | 128Mi |
+| cert-manager cainjector (prod) | — | — (the upstream chart offers no probes) | — | 10m / 64Mi | 256Mi |
 
 CPU limits are intentionally unset (CFS throttling hurts latency). Memory limits are set. ResourceQuota/LimitRange enforce defaults in store namespaces.
 
@@ -581,6 +584,7 @@ Every namespace we own is **default-deny in both directions**; each chart adds o
 | mariadb | its WordPress and init job (:3306) | nothing |
 | woo-mcp | platform-api only (:3000) | DNS; its WordPress (:80) |
 | notes-mcp, everything-mcp | platform-api only | **nothing**, not even DNS |
+| cert-manager HTTP-01 solver (prod, short-lived, in `platform` and each store namespace) | ingress controller (:8089) | nothing |
 
 - **API server address:** Calico checks egress *after* kube-proxy's DNAT, so a rule for the `kubernetes` ClusterIP (10.96.0.1:443) would never match; the packet's real destination is the API server endpoint (minikube: 192.168.49.2:8443, k3s: node IP :6443). The chart reads `default/kubernetes` Endpoints with Helm `lookup` at install time and allows exactly that IP and port. `helm template` has no cluster, so it renders a fallback from values (`networkPolicy.apiServer`). If the API server's address ever changes, a `helm upgrade` picks it up.
 - *Why egress to pods is limited by port only, not by namespace:* the bonus stores live in `store-<id>` namespaces created at runtime, and a NetworkPolicy can't select namespaces by name prefix. The receiving side already has strict ingress policies, so the platform's egress rule only has to stop it from reaching odd ports (databases on 3306 stay unreachable: verified).
@@ -709,6 +713,8 @@ The required work, the bonus and most stand-outs are built and verified (ROADMAP
 - **Host hardening:** only ports 22/80/443 open, SSH keys only, automatic security updates.
 
 **Verification:** `dod.sh` run against the public URLs; HTTPS on every host (with an SSL Labs check); `deploy.sh` rerun is a no-op; `helm rollback` once on the VPS.
+
+**TLS as built:** `charts/cert-manager` wraps jetstack's chart (v1.21.2, pinned) like `charts/monitoring` wraps kube-prometheus-stack. It sets requests and memory limits; the upstream chart already runs non-root with a read-only root filesystem. It also renders one ClusterIssuer, `platform-tls` (ACME, HTTP-01 through Traefik), as a Helm post-install hook. *Why a hook:* Helm checks every resource's kind before installing anything, and the ClusterIssuer kind only exists once the same release's CRDs are in. `deploy.sh` installs it first. Every Ingress gets its own Secret (`platform-api-tls`, `platform-dashboard-tls`, `<store>-tls`, `grafana-tls`), and only the Ingress that owns a host names the issuer. A NetworkPolicy lets the ingress controller reach the solver pods (SYSTEM.md L58). `k3d-prod-test.sh` switches the same issuer to `selfSigned`, because Let's Encrypt can't reach a laptop. *Why the neutral name `platform-tls`:* the test can then swap the issuer type without renaming annotations in three charts.
 
 **As built so far (no VPS yet):** `scripts/k3d-prod-test.sh` runs the production path on a local k3s cluster (k3d) serving ports 80/443: it fills `values-prod.yaml` the way an operator would (domain, image names) in a scratch copy, creates the Secrets the preflight lists, and runs `deploy.sh` unchanged. Result: all releases deployed on Traefik and `local-path`, `dod.sh` 19/19 and the isolation suite 40/40 on k3s. What it can't show is public DNS and Let's Encrypt; Traefik serves its default certificate. The CI `images` job pushes all six images to `ghcr.io/<owner>/…` on a `v*` tag, which is what a VPS pulls.
 

@@ -1,0 +1,5 @@
+# k3s VPS: Let's Encrypt certificates for every host under the wildcard A record.
+issuer:
+  enabled: true
+  acme:
+    email: "you@example.com"     # scripts/deploy.sh refuses to run while this placeholder is left

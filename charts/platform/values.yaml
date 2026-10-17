@@ -3,7 +3,11 @@ global:
   ingressClassName: "nginx"
   tls:
     enabled: false
-    secretName: "tls-secret"
+    # Empty: one Secret per host (<name>-tls), filled by cert-manager when clusterIssuer is set.
+    # Set it to serve one existing (e.g. wildcard) certificate on every host instead.
+    secretName: ""
+    # ClusterIssuer named on the Ingresses (charts/cert-manager), e.g. "platform-tls" in production.
+    clusterIssuer: ""
 
 gateway:
   encKey:

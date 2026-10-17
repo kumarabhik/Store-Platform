@@ -89,8 +89,10 @@ Credentials for the LLM and admin tools go in the repo root `.env.local` (for ex
 ```bash
 bash scripts/k3s-install.sh      # once: k3s (with Traefik) + helm
 # edit charts/*/values-prod.yaml: your domain (wildcard A record *.<domain> -> VPS IP), image tags
-bash scripts/deploy.sh           # checks values + Secrets, then installs the three charts with --atomic
+bash scripts/deploy.sh           # checks values + Secrets, then installs cert-manager and the charts with --atomic
 ```
+
+**HTTPS:** `deploy.sh` installs cert-manager first (`charts/cert-manager`). Every host then gets its own Let's Encrypt certificate over HTTP-01, so you only need ports 80 and 443 open and the wildcard A record. Put your email in `charts/cert-manager/values-prod.yaml` (the script refuses the placeholder). Check with `kubectl get certificates -A`. A certificate stuck at `READY False` usually means DNS doesn't point at the VPS yet: `kubectl describe challenge -A` says why.
 
 **Try the production path without a VPS:** `bash scripts/k3d-prod-test.sh` creates a local k3s cluster (k3d) on ports 80/443, fills `values-prod.yaml` like an operator would (in a scratch copy), creates the required Secrets and runs `deploy.sh` unchanged. Then run `dod.sh` and `verify-store-isolation.sh` against it (commands in the script header). Images for a real VPS come from GHCR: push a tag (`git tag v0.1.0 && git push --tags`) and CI publishes them.
 

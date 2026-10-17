@@ -1,0 +1,11 @@
+apiVersion: v2
+name: cert-manager
+description: cert-manager plus the ClusterIssuer every production Ingress names (DESIGN §13.4)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  # Pinned; `helm dependency build charts/cert-manager` downloads it into charts/ (git-ignored).
+  - name: cert-manager
+    version: v1.21.2
+    repository: https://charts.jetstack.io

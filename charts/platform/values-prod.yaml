@@ -4,7 +4,8 @@ global:
   ingressClassName: "traefik"
   tls:
     enabled: true
-    secretName: "wildcard-tls-secret"
+    # Let's Encrypt, one certificate per host (HTTP-01, DESIGN §13.4); charts/cert-manager.
+    clusterIssuer: "platform-tls"
 
 networkPolicy:
   # Traefik is built into k3s and runs in kube-system.
