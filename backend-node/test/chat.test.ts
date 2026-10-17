@@ -3,8 +3,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { MAX_ROUNDS, runChat, sanitizeHistory, systemPrompt, type ChatEvent } from "../src/chat/agent";
 import { createLlm, LlmError, type ChatMessage, type Llm, type ToolCall } from "../src/chat/llm";
 import { UnknownToolError, type GatewayUser } from "../src/gateway/core";
+import { sqliteAvailable } from "./sqlite";
+import { testDb } from "./testDb";
 
-// P6: the chat tool loop, with a scripted LLM and a fake GatewayCore (no network, no SQLite).
+// P6: the chat tool loop, with a scripted LLM and a fake GatewayCore (no network). Only the
+// approval store needs a database.
 
 const user = { id: "u-a", email: "a@example.com", name: "Admin A", role: "admin" as const };
 const call = (id: string, name: string, args: unknown): ToolCall => ({ id, type: "function", function: { name, arguments: typeof args === "string" ? args : JSON.stringify(args) } });
@@ -170,7 +173,13 @@ describe("OpenAI-compatible client", () => {
 });
 
 describe("human approval for risky calls (P10)", async () => {
+  // Vitest runs a describe body even when skipped; the approval store opens a database (SYSTEM.md L24).
+  if (!sqliteAvailable) {
+    it.skip("needs better-sqlite3: run bash scripts/test-backend.sh", () => {});
+    return;
+  }
   const { approvalReason, parseApprovalMode, createApprovals } = await import("../src/chat/approval");
+  const db = await testDb("approvals");
   const tools: Record<string, { annotations?: Record<string, unknown> }> = {
     woo__create_product: { annotations: { readOnlyHint: false, destructiveHint: false } },
     woo__update_order_status: { annotations: { readOnlyHint: false, destructiveHint: true } },
@@ -180,7 +189,7 @@ describe("human approval for risky calls (P10)", async () => {
   // A fake core that also answers findTool / recordDeclined, and an approvals store whose pending
   // requests the test answers like the browser would.
   function setup(answer: (e: Extract<ChatEvent, { type: "approval_required" }>) => boolean | "never", timeoutMs = 2_000) {
-    const store = createApprovals(timeoutMs);
+    const store = createApprovals(db, timeoutMs);
     const { core, calls } = fakeCore(() => ({ content: [{ type: "text", text: "done" }] }));
     const declined: { name: string; reason: string }[] = [];
     const fullCore = {
@@ -193,7 +202,7 @@ describe("human approval for risky calls (P10)", async () => {
       events.push(e);
       if (e.type === "approval_required") {
         const a = answer(e);
-        if (a !== "never") setTimeout(() => store.decide(e.id, user.id, a), 5);
+        if (a !== "never") setTimeout(() => void store.decide(e.id, user.id, a), 5);
       }
     };
     const go = (llm: Llm) =>
@@ -241,18 +250,30 @@ describe("human approval for risky calls (P10)", async () => {
     expect(t.calls.map((c) => c.name)).toEqual(["woo__list_orders"]);
   });
 
-  it("only the user whose chat is waiting can answer; a closed stream declines", async () => {
-    const store = createApprovals(1_000);
-    const waiting = store.wait("a1", "u-a");
-    expect(store.decide("a1", "u-someone-else", true)).toBe(false);
-    expect(store.decide("nope", "u-a", true)).toBe(false);
-    expect(store.decide("a1", "u-a", true)).toBe(true);
+  it("only the user whose chat is waiting can answer, once; a closed stream declines", async () => {
+    const store = createApprovals(db, 1_000);
+    await store.open("a1", "u-a");
+    const waiting = store.wait("a1");
+    expect(await store.decide("a1", "u-someone-else", true)).toBe(false);
+    expect(await store.decide("nope", "u-a", true)).toBe(false);
+    expect(await store.decide("a1", "u-a", true)).toBe(true);
+    expect(await store.decide("a1", "u-a", false)).toBe(false);
     expect(await waiting).toBe("approved");
-    expect(store.size).toBe(0);
+    expect(await db.get(`select count(*) as n from chat_approvals`)).toEqual({ n: 0 });
     const ac = new AbortController();
-    const closed = store.wait("a2", "u-a", ac.signal);
+    await store.open("a2", "u-a");
+    const closed = store.wait("a2", ac.signal);
     ac.abort();
     expect(await closed).toBe("declined");
+  });
+
+  it("two replicas: the chat waits on one pod, the Approve click lands on the other", async () => {
+    const podA = createApprovals(db, 2_000);
+    const podB = createApprovals(db, 2_000);
+    await podA.open("x1", "u-a");
+    const waiting = podA.wait("x1");
+    expect(await podB.decide("x1", "u-a", true)).toBe(true);
+    expect(await waiting).toBe("approved");
   });
 
   it("rules: mode and annotations decide", () => {

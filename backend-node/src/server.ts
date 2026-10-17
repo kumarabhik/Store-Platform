@@ -21,7 +21,8 @@ import {
   upsertBillingAccount,
   upsertBillingInvoice,
 } from "./billing";
-import { addEvent, openDb } from "./db";
+import { addEvent, openDatabase } from "./db";
+import { tryAcquireLeader } from "./leader";
 import { registerLegacySaasGate } from "./features";
 import { applyMysqlBackupJob, findJobPodName, makeKubeClients, parseApiServerEndpoints, readPodLogs, waitForJob } from "./kube";
 import { computeMetrics, renderPrometheus } from "./metrics.js";
@@ -40,7 +41,7 @@ import { registerStoreServer, removeStoreServers } from "./gateway/storeServers"
 import { createGatewayMetrics } from "./gateway/metrics";
 import { parseToolMode } from "./gateway/toolSearch";
 import { createUpstreamPool } from "./gateway/upstreams";
-import { applyAdminEmails, roleOf as storedRoleOf, signupRole } from "./team/members";
+import { applyAdminEmails, roleOf as storedRoleOf, signupRole, TEAM_LOCK } from "./team/members";
 import { registerTeamRoutes } from "./team/routes";
 import { createLlm, llmConfigFromEnv } from "./chat/llm";
 import { registerChatRoutes } from "./chat/routes";
@@ -199,36 +200,34 @@ async function main() {
     credentials: false,
   });
 
-  const db = openDb(DB_PATH);
+  // DATABASE_URL=postgres://… (from a Secret) selects Postgres; otherwise the SQLite file at DB_PATH.
+  const db = await openDatabase(process.env.DATABASE_URL, DB_PATH);
+  app.log.info({ database: db.dialect }, "database ready");
   const kube = makeKubeClients();
   await fs.mkdir(BACKUP_DIR, { recursive: true });
 
   // The role is read from users.role; an email in ADMIN_EMAILS is promoted (and stored) on sight.
-  const decorateUser = (user: PublicUser): CurrentUser => applyAdminEmails(db, user, ADMIN_EMAILS);
+  const decorateUser = (user: PublicUser): Promise<CurrentUser> => applyAdminEmails(db, user, ADMIN_EMAILS);
 
   const isAdminRequest = (req: FastifyRequest) =>
     !!ADMIN_API_KEY && !!extractApiKey(req) && timingSafeEquals(extractApiKey(req), ADMIN_API_KEY);
 
-  const currentUserOf = (req: FastifyRequest) => {
-    const user = getUserBySessionToken(db, extractSessionToken(req));
-    return user ? decorateUser(user) : null;
+  const currentUserOf = async (req: FastifyRequest) => {
+    const user = await getUserBySessionToken(db, extractSessionToken(req));
+    return user ? await decorateUser(user) : null;
   };
 
-  const requireUser = (req: FastifyRequest, reply: FastifyReply) => {
-    const user = currentUserOf(req);
+  const requireUser = async (req: FastifyRequest, reply: FastifyReply) => {
+    const user = await currentUserOf(req);
     if (user) return user;
     reply.code(401).send({ error: "unauthorized" });
     return null;
   };
 
-  const storeById = (id: string) =>
-    ((db
-      .prepare(
-        `select id, name, engine, status, namespace, url, custom_domain, domain_status, domain_last_error,
+  const storeById = async (id: string) =>
+    ((await db.get(`select id, name, engine, status, namespace, url, custom_domain, domain_status, domain_last_error,
                 last_backup_at, created_at, updated_at, last_error, created_by, user_id
-         from stores where id=?`
-      )
-      .get(id) as StoreRow | undefined) ?? null);
+         from stores where id=?`, id) as StoreRow | undefined) ?? null);
 
   const publicOriginOf = (req: FastifyRequest) =>
     (typeof req.headers.origin === "string" && req.headers.origin.trim()
@@ -256,14 +255,14 @@ async function main() {
     return payload;
   }
 
-  function requireStoreAccess(req: FastifyRequest, reply: FastifyReply, id: string) {
-    const row = storeById(id);
+  async function requireStoreAccess(req: FastifyRequest, reply: FastifyReply, id: string) {
+    const row = await storeById(id);
     if (!row) {
       reply.code(404).send({ error: "not_found" });
       return null;
     }
     if (isAdminRequest(req)) return { row, user: null as CurrentUser | null, actor: "admin" };
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return null;
     if (user.role === "admin" || row.user_id === user.id) return { row, user, actor: user.email };
     reply.code(404).send({ error: "not_found" });
@@ -330,13 +329,14 @@ async function main() {
   }
 
   async function createBackup(store: StoreRow, actor: string) {
-    const inserted = db
-      .prepare(`insert into store_backups(store_id,status,started_at,created_by) values (?, 'Running', datetime('now'), ?)`)
-      .run(store.id, actor);
-    const backupId = Number(inserted.lastInsertRowid);
+    const inserted = (await db.get<{ id: number }>(
+      `insert into store_backups(store_id,status,started_at,created_by) values (?, 'Running', ${db.now}, ?) returning id`,
+      store.id, actor,
+    ))!;
+    const backupId = Number(inserted.id);
     const jobName = `db-backup-${store.id}-${backupId}`;
 
-    addEvent(db, store.id, "backup_requested", `job=${jobName}`, actor);
+    await addEvent(db, store.id, "backup_requested", `job=${jobName}`, actor);
 
     try {
       await applyMysqlBackupJob(kube.batch, store.namespace, jobName, {
@@ -361,26 +361,20 @@ async function main() {
       await fs.mkdir(targetDir, { recursive: true });
       await fs.writeFile(filePath, content);
 
-      db.prepare(
-        `update store_backups
-         set status='Completed', file_path=?, file_name=?, size_bytes=?, completed_at=datetime('now')
-         where id=?`
-      ).run(filePath, fileName, content.byteLength, backupId);
-      db.prepare(`update stores set last_backup_at=datetime('now'), updated_at=datetime('now') where id=?`).run(store.id);
-      addEvent(db, store.id, "backup_completed", fileName, actor);
+      await db.run(`update store_backups
+         set status='Completed', file_path=?, file_name=?, size_bytes=?, completed_at=${db.now}
+         where id=?`, filePath, fileName, content.byteLength, backupId);
+      await db.run(`update stores set last_backup_at=${db.now}, updated_at=${db.now} where id=?`, store.id);
+      await addEvent(db, store.id, "backup_completed", fileName, actor);
     } catch (err: any) {
       const message = String(err?.message ?? err);
-      db.prepare(`update store_backups set status='Failed', error=?, completed_at=datetime('now') where id=?`).run(
-        message,
-        backupId
-      );
-      addEvent(db, store.id, "backup_failed", message, actor);
+      await db.run(`update store_backups set status='Failed', error=?, completed_at=${db.now} where id=?`, message,
+        backupId);
+      await addEvent(db, store.id, "backup_failed", message, actor);
       throw err;
     }
 
-    return db
-      .prepare(`select id, status, file_name, size_bytes, error, started_at, completed_at from store_backups where id=?`)
-      .get(backupId);
+    return await db.get(`select id, status, file_name, size_bytes, error, started_at, completed_at from store_backups where id=?`, backupId);
   }
 
   app.addHook("onRequest", async (req, reply) => {
@@ -429,7 +423,7 @@ async function main() {
     registry,
     health,
     pool: upstreamPool,
-    callerOf: (req) => (isAdminRequest(req) ? { role: "admin" } : currentUserOf(req)),
+    callerOf: async (req) => (isAdminRequest(req) ? { role: "admin" } : await currentUserOf(req)),
   });
   // Chat agent (DESIGN §7.4): an LLM tool loop that calls tools through GatewayCore as the user.
   const llmConfig = llmConfigFromEnv();
@@ -440,7 +434,7 @@ async function main() {
       llm: llmConfig ? createLlm(llmConfig) : null,
       timezone: process.env.CHAT_TIMEZONE?.trim() || "UTC",
       // Ask before risky tool calls in the chat (P10): CHAT_APPROVAL = writes | destructive | off.
-      approvals: { mode: parseApprovalMode(process.env.CHAT_APPROVAL), store: createApprovals() },
+      approvals: { mode: parseApprovalMode(process.env.CHAT_APPROVAL), store: createApprovals(db) },
     },
     currentUser: currentUserOf,
   });
@@ -450,7 +444,6 @@ async function main() {
     createSession: (userId) => createSession(db, userId),
     dashboardUrl: DASHBOARD_PUBLIC_URL,
   });
-  health.start();
   // Upstream credentials live in the upstream's own namespace, so they are read through the
   // Kubernetes API, not mounted (DESIGN §10.1).
   const readSecret = async (namespace: string, name: string, key: string) => {
@@ -459,13 +452,33 @@ async function main() {
     if (!value) throw new Error(`Secret ${namespace}/${name} has no key '${key}'`);
     return Buffer.from(value, "base64").toString("utf8");
   };
-  const stopSeeding = startSeeding(
-    registry,
-    health,
-    parseSeedServers(process.env.GATEWAY_SEED_SERVERS),
-    ({ namespace, name, key }) => readSecret(namespace, name, key),
-    app.log,
-  );
+  // With several API replicas, one of them probes upstreams and seeds Helm's servers; the others
+  // serve tools/list and calls from the same database (DESIGN §13.3). Leadership is a 15 s lease
+  // in the database, renewed every 5 s, so a replica that dies is replaced within 15 s.
+  let leading = false;
+  let stopSeeding = () => {};
+  const lead = async () => {
+    const now = await tryAcquireLeader(db, "gateway", 15).catch(() => false);
+    if (now && !leading) {
+      health.start();
+      stopSeeding = startSeeding(
+        registry,
+        health,
+        parseSeedServers(process.env.GATEWAY_SEED_SERVERS),
+        ({ namespace, name, key }) => readSecret(namespace, name, key),
+        app.log,
+      );
+      app.log.info("gateway: this replica now probes upstreams");
+    } else if (!now && leading) {
+      health.stop();
+      stopSeeding();
+      app.log.info("gateway: another replica probes upstreams now");
+    }
+    leading = now;
+  };
+  await lead();
+  const leaderTimer = setInterval(() => void lead(), 5_000);
+  leaderTimer.unref();
 
   // Per-store backup keys and buckets on the backup store (DESIGN §13.6). The admin token is read from
   // the backup store's Secret when needed, never kept in env; no Secret = no backups for new stores.
@@ -511,7 +524,7 @@ async function main() {
         await registerStoreServer(storeServerDeps, store);
       },
       onRemove: async (storeId) => {
-        removeStoreServers(storeServerDeps, storeId);
+        await removeStoreServers(storeServerDeps, storeId);
       },
     },
   );
@@ -524,7 +537,7 @@ async function main() {
   const metricsApp = Fastify({ logger: false });
   metricsApp.get("/metrics", async (_req, reply) => {
     reply.header("content-type", "text/plain; version=0.0.4");
-    return renderPrometheus(computeMetrics(db)) + gatewayMetrics.render(registry.list());
+    return renderPrometheus(await computeMetrics(db)) + gatewayMetrics.render(await registry.list());
   });
 
   app.post("/auth/signup", async (req, reply) => {
@@ -536,18 +549,23 @@ async function main() {
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send(parsed.error.flatten());
-    if (findUserByEmail(db, parsed.data.email)) return reply.code(409).send({ error: "email_taken" });
-
     // First account (no active admin yet) becomes admin; after that, invites only, unless
     // AUTH_OPEN_SIGNUP. Operators can still let an ADMIN_EMAILS address sign up directly.
+    // Check and insert under TEAM_LOCK, so two first signups (even on two replicas) can't both be admin.
     const isAdminEmail = ADMIN_EMAILS.has(parsed.data.email.trim().toLowerCase());
-    const role = isAdminEmail ? "admin" : signupRole(db, AUTH_OPEN_SIGNUP);
-    if (!role) {
+    const outcome = await db.tx(async (db) => {
+      if (await findUserByEmail(db, parsed.data.email)) return "email_taken" as const;
+      const role = isAdminEmail ? "admin" : await signupRole(db, AUTH_OPEN_SIGNUP);
+      if (!role) return "signup_closed" as const;
+      return createUser(db, parsed.data, role);
+    }, TEAM_LOCK);
+    if (outcome === "email_taken") return reply.code(409).send({ error: "email_taken" });
+    if (outcome === "signup_closed") {
       return reply.code(403).send({ error: "signup_closed", message: "Signup is closed. Ask an admin for an invite link." });
     }
-    const user = createUser(db, parsed.data, role);
-    ensureBillingAccount(db, user);
-    return { token: createSession(db, user.id), user: decorateUser(user) };
+    const user = outcome;
+    await ensureBillingAccount(db, user);
+    return { token: await createSession(db, user.id), user: await decorateUser(user) };
   });
 
   app.post("/auth/login", async (req, reply) => {
@@ -559,43 +577,43 @@ async function main() {
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send(parsed.error.flatten());
 
-    const user = authenticateUser(db, parsed.data.email, parsed.data.password);
+    const user = await authenticateUser(db, parsed.data.email, parsed.data.password);
     if (!user) return reply.code(401).send({ error: "invalid_credentials" });
 
-    ensureBillingAccount(db, user);
-    return { token: createSession(db, user.id), user: decorateUser(user) };
+    await ensureBillingAccount(db, user);
+    return { token: await createSession(db, user.id), user: await decorateUser(user) };
   });
 
   app.get("/auth/me", async (req, reply) => {
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return;
-    ensureBillingAccount(db, user);
+    await ensureBillingAccount(db, user);
     return { user };
   });
 
   app.post("/auth/logout", async (req) => {
-    deleteSession(db, extractSessionToken(req));
+    await deleteSession(db, extractSessionToken(req));
     return { ok: true };
   });
 
   app.get("/billing/summary", async (req, reply) => {
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return;
-    ensureBillingAccount(db, user);
+    await ensureBillingAccount(db, user);
 
     return {
       configured: Boolean(STRIPE_SECRET_KEY && STRIPE_PRICE_ID),
       provider: "stripe",
       planLabel: STRIPE_PLAN_LABEL,
       priceId: STRIPE_PRICE_ID || null,
-      account: getBillingAccount(db, user.id),
-      usage: summarizeUsage(db, user.id),
-      invoices: listBillingInvoices(db, user.id),
+      account: await getBillingAccount(db, user.id),
+      usage: await summarizeUsage(db, user.id),
+      invoices: await listBillingInvoices(db, user.id),
     };
   });
 
   app.post("/billing/checkout-session", async (req, reply) => {
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return;
     if (!STRIPE_SECRET_KEY || !STRIPE_PRICE_ID) return reply.code(400).send({ error: "stripe_not_configured" });
 
@@ -611,7 +629,7 @@ async function main() {
     form.set("metadata[user_id]", user.id);
 
     const session = await stripeRequest("/checkout/sessions", "POST", form);
-    upsertBillingAccount(db, user.id, {
+    await upsertBillingAccount(db, user.id, {
       provider: "stripe",
       planKey: "growth",
       status: "pending",
@@ -624,7 +642,7 @@ async function main() {
   });
 
   app.get("/billing/confirm", async (req, reply) => {
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return;
 
     const sessionId = String((req.query as { session_id?: string }).session_id ?? "").trim();
@@ -646,7 +664,7 @@ async function main() {
       ? await stripeRequest(`/invoices/${encodeURIComponent(String(session.invoice))}`, "GET")
       : null;
 
-    upsertBillingAccount(db, user.id, {
+    await upsertBillingAccount(db, user.id, {
       provider: "stripe",
       planKey: "growth",
       status: String(subscription?.status ?? session.status ?? "active"),
@@ -659,7 +677,7 @@ async function main() {
     });
 
     if (invoice) {
-      upsertBillingInvoice(db, user.id, {
+      await upsertBillingInvoice(db, user.id, {
         provider: "stripe",
         externalId: String(invoice.id ?? "") || null,
         amountCents: Number(invoice.total ?? 0),
@@ -672,14 +690,14 @@ async function main() {
       });
     }
 
-    return { ok: true, account: getBillingAccount(db, user.id), invoices: listBillingInvoices(db, user.id) };
+    return { ok: true, account: await getBillingAccount(db, user.id), invoices: await listBillingInvoices(db, user.id) };
   });
 
   app.post("/billing/portal", async (req, reply) => {
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return;
 
-    const account = getBillingAccount(db, user.id);
+    const account = await getBillingAccount(db, user.id);
     if (!STRIPE_SECRET_KEY || !account?.stripe_customer_id) {
       return reply.code(409).send({ error: "stripe_customer_missing" });
     }
@@ -693,7 +711,7 @@ async function main() {
   });
 
   app.get("/stores", async (req, reply) => {
-    const user = isAdminRequest(req) ? null : requireUser(req, reply);
+    const user = isAdminRequest(req) ? null : await requireUser(req, reply);
     if (!isAdminRequest(req) && !user) return;
 
     const query =
@@ -711,14 +729,14 @@ async function main() {
            order by s.created_at desc`;
 
     return isAdminRequest(req) || user?.role === "admin"
-      ? db.prepare(query).all()
-      : db.prepare(query).all(user!.id);
+      ? await db.all(query)
+      : await db.all(query, user!.id);
   });
 
   app.get("/stores/:id/events", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
-    return db.prepare(`select * from store_events where store_id=? order by ts desc, id desc limit 200`).all(access.row.id);
+    return await db.all(`select * from store_events where store_id=? order by ts desc, id desc limit 200`, access.row.id);
   });
 
   // Stores from our chart keep credentials in Secret wc-<id>-credentials; stores provisioned
@@ -745,24 +763,20 @@ async function main() {
   }
 
   app.get("/stores/:id/credentials", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
     return { wordpressUsername: "admin", ...(await storeCredentials(access.row)) };
   });
 
   app.get("/stores/:id/summary", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
     const credentials = await storeCredentials(access.row).catch(() => null);
-    const owner = db
-      .prepare(
-        `select u.name as owner_name, u.email as owner_email
+    const owner = await db.get(`select u.name as owner_name, u.email as owner_email
          from stores s
          left join users u on u.id=s.user_id
-         where s.id=?`
-      )
-      .get(access.row.id) as { owner_name: string | null; owner_email: string | null } | undefined;
+         where s.id=?`, access.row.id) as { owner_name: string | null; owner_email: string | null } | undefined;
     return {
       id: access.row.id,
       name: access.row.name,
@@ -781,28 +795,28 @@ async function main() {
   });
 
   app.get("/stores/:id/links", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
     if (!access.row.url) return { storefront: null, admin: null };
     return { storefront: access.row.url, admin: `${access.row.url.replace(/\/$/, "")}/wp-admin` };
   });
 
   app.patch("/stores/:id", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
     const parsed = z.object({ name: z.string().trim().min(2).max(80) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send(parsed.error.flatten());
 
     const name = sanitizeStoreName(parsed.data.name);
-    db.prepare(`update stores set name=?, updated_at=datetime('now') where id=?`).run(name, access.row.id);
-    addEvent(db, access.row.id, "renamed", `name=${name}`, access.actor);
+    await db.run(`update stores set name=?, updated_at=${db.now} where id=?`, name, access.row.id);
+    await addEvent(db, access.row.id, "renamed", `name=${name}`, access.actor);
 
     return { ok: true, id: access.row.id, name };
   });
 
   app.get("/stores/:id/domain", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
     return {
@@ -819,7 +833,7 @@ async function main() {
   });
 
   app.post("/stores/:id/domain", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
     const parsed = z
@@ -831,66 +845,56 @@ async function main() {
 
     const customDomain = sanitizeDomain(parsed.data.domain);
     const reconfiguring = access.row.status === "Ready";
-    db.prepare(
-      `update stores
+    await db.run(`update stores
        set custom_domain=?, domain_status='Awaiting DNS', domain_last_error=null,
            status=case when status='Ready' then 'Provisioning' else status end,
-           updated_at=datetime('now')
-       where id=?`
-    ).run(customDomain, access.row.id);
+           updated_at=${db.now}
+       where id=?`, customDomain, access.row.id);
 
-    addEvent(db, access.row.id, "custom_domain_requested", `domain=${customDomain}`, access.actor);
+    await addEvent(db, access.row.id, "custom_domain_requested", `domain=${customDomain}`, access.actor);
     return { ok: true, customDomain, targetHost: platformHostFor(access.row.id), reconfiguring };
   });
 
   app.delete("/stores/:id/domain", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
     const reconfiguring = access.row.status === "Ready";
-    db.prepare(
-      `update stores
+    await db.run(`update stores
        set custom_domain=null, domain_status='Platform subdomain', domain_last_error=null,
            status=case when status='Ready' then 'Provisioning' else status end,
-           updated_at=datetime('now')
-       where id=?`
-    ).run(access.row.id);
+           updated_at=${db.now}
+       where id=?`, access.row.id);
 
-    addEvent(db, access.row.id, "custom_domain_removed", undefined, access.actor);
+    await addEvent(db, access.row.id, "custom_domain_removed", undefined, access.actor);
     return { ok: true, reconfiguring, targetHost: platformHostFor(access.row.id) };
   });
 
   app.get("/stores/:id/monitoring", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
     return await monitoringFor(access.row);
   });
 
   app.get("/stores/:id/backups", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
-    return db
-      .prepare(
-        `select id, status, file_name, size_bytes, error, started_at, completed_at
-         from store_backups where store_id=? order by started_at desc limit 20`
-      )
-      .all(access.row.id);
+    return await db.all(`select id, status, file_name, size_bytes, error, started_at, completed_at
+         from store_backups where store_id=? order by started_at desc limit 20`, access.row.id);
   });
 
   app.post("/stores/:id/backups", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
     return { ok: true, backup: await createBackup(access.row, access.actor) };
   });
 
   app.get("/stores/:id/backups/:backupId/download", async (req, reply) => {
     const params = req.params as { id: string; backupId: string };
-    const access = requireStoreAccess(req, reply, params.id);
+    const access = await requireStoreAccess(req, reply, params.id);
     if (!access) return;
 
-    const backup = db
-      .prepare(`select file_path, file_name, status from store_backups where id=? and store_id=?`)
-      .get(Number(params.backupId), access.row.id) as
+    const backup = await db.get(`select file_path, file_name, status from store_backups where id=? and store_id=?`, Number(params.backupId), access.row.id) as
       | { file_path: string | null; file_name: string | null; status: string }
       | undefined;
 
@@ -905,11 +909,11 @@ async function main() {
   });
 
   app.post("/stores/:id/upgrade", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
-    db.prepare(`update stores set status='Provisioning', updated_at=datetime('now') where id=?`).run(access.row.id);
-    addEvent(db, access.row.id, "upgrade_requested", undefined, access.actor);
+    await db.run(`update stores set status='Provisioning', updated_at=${db.now} where id=?`, access.row.id);
+    await addEvent(db, access.row.id, "upgrade_requested", undefined, access.actor);
 
     return {
       ok: true,
@@ -921,7 +925,7 @@ async function main() {
   });
 
   app.post("/stores", async (req, reply) => {
-    const user = requireUser(req, reply);
+    const user = await requireUser(req, reply);
     if (!user) return;
 
     const parsed = z
@@ -938,9 +942,7 @@ async function main() {
       return reply.code(429).send({ error: "create_rate_limited", retry_after_sec: decision.retryAfterSec });
     }
 
-    const count = db
-      .prepare(`select count(*) as c from stores where user_id=? and status in ('Provisioning','Ready')`)
-      .get(user.id) as { c: number } | undefined;
+    const count = await db.get(`select count(*) as c from stores where user_id=? and status in ('Provisioning','Ready')`, user.id) as { c: number } | undefined;
     if ((count?.c ?? 0) >= MAX_STORES) {
       return reply.code(429).send({ error: "max_stores_reached", max_stores: MAX_STORES });
     }
@@ -949,51 +951,47 @@ async function main() {
     const ns = `store-${id}`;
     const name = sanitizeStoreName(parsed.data.name);
 
-    db.prepare(
-      `insert into stores(
+    await db.run(`insert into stores(
          id, name, engine, status, namespace, url, user_id, custom_domain, domain_status,
          domain_last_error, last_backup_at, created_at, last_error, updated_at, created_by
        )
        values (
          ?, ?, ?, 'Provisioning', ?, null, ?, null, 'Provisioning platform subdomain',
-         null, null, datetime('now'), null, datetime('now'), ?
-       )`
-    ).run(id, name, parsed.data.engine, ns, user.id, req.ip);
+         null, null, ${db.now}, null, ${db.now}, ?
+       )`, id, name, parsed.data.engine, ns, user.id, req.ip);
 
     if (parsed.data.engine === "medusa") {
-      db.prepare(`update stores set status='Failed', last_error=?, updated_at=datetime('now') where id=?`).run(
-        "medusa engine stubbed (not implemented in Round 1)",
-        id
-      );
-      addEvent(db, id, "failed", "medusa engine stubbed (not implemented in Round 1)", user.email);
+      await db.run(`update stores set status='Failed', last_error=?, updated_at=${db.now} where id=?`, "medusa engine stubbed (not implemented in Round 1)",
+        id);
+      await addEvent(db, id, "failed", "medusa engine stubbed (not implemented in Round 1)", user.email);
       return { id, name, namespace: ns, status: "Failed" };
     }
 
-    addEvent(db, id, "created", `engine=${parsed.data.engine} name=${name} host=${platformHostFor(id)}`, user.email);
+    await addEvent(db, id, "created", `engine=${parsed.data.engine} name=${name} host=${platformHostFor(id)}`, user.email);
     return { id, name, namespace: ns, status: "Provisioning" };
   });
 
   app.post("/stores/:id/content-suggestions", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
     return await suggestContent(access.row.id);
   });
 
   app.delete("/stores/:id", async (req, reply) => {
-    const access = requireStoreAccess(req, reply, (req.params as { id: string }).id);
+    const access = await requireStoreAccess(req, reply, (req.params as { id: string }).id);
     if (!access) return;
 
     // Its MCP server goes first, so clients stop seeing store_<id>__* tools right away (DESIGN §11).
-    removeStoreServers(storeServerDeps, access.row.id);
-    db.prepare(`update stores set status='Deleting', updated_at=datetime('now') where id=?`).run(access.row.id);
-    addEvent(db, access.row.id, "delete_requested", `ns=${access.row.namespace}`, access.actor);
+    await removeStoreServers(storeServerDeps, access.row.id);
+    await db.run(`update stores set status='Deleting', updated_at=${db.now} where id=?`, access.row.id);
+    await addEvent(db, access.row.id, "delete_requested", `ns=${access.row.namespace}`, access.actor);
     try {
       await kube.core.deleteNamespace(access.row.namespace);
     } catch {}
     try {
       await kube.core.readNamespace(access.row.namespace);
     } catch {
-      db.prepare(`delete from stores where id=?`).run(access.row.id);
+      await db.run(`delete from stores where id=?`, access.row.id);
       return { ok: true, deleted: true };
     }
     return { ok: true, deleted: false };
@@ -1013,11 +1011,12 @@ async function main() {
 
   app.addHook("onClose", async () => {
     await metricsApp.close();
+    clearInterval(leaderTimer);
     stopSeeding();
     health.stop();
     await upstreamPool.closeAll();
     stopReconciler();
-    db.close();
+    await db.close();
   });
 
   let shuttingDown = false;

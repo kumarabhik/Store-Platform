@@ -50,6 +50,7 @@ llm=$(grep -E '^(export +)?(LLM_API_KEY|GROQ_API_KEY)=' .env.local 2>/dev/null |
 mk() { kubectl get namespace "$1" >/dev/null 2>&1 || kubectl create namespace "$1" >/dev/null
        kubectl -n "$1" get secret "$2" >/dev/null 2>&1 || { shift 2; kubectl "$@" >/dev/null; }; }
 mk platform gateway-enc-key -n platform create secret generic gateway-enc-key --from-literal=key="$(openssl rand -base64 32)"
+mk platform platform-postgres -n platform create secret generic platform-postgres --from-literal=password="$(openssl rand -hex 24)"
 mk platform platform-api-env -n platform create secret generic platform-api-env --from-literal=LLM_API_KEY="$llm" --from-literal=ADMIN_API_KEY="$(openssl rand -hex 24)"
 mk store-default store-default-credentials -n store-default create secret generic store-default-credentials \
   --from-literal=mariadb-root-password="$(openssl rand -hex 16)" --from-literal=mariadb-password="$(openssl rand -hex 16)" \

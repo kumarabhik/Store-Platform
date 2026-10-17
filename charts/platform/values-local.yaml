@@ -4,7 +4,8 @@ global:
 
 api:
   image: "store-platform/api-node:dev"
-  replicas: 1
+  # Two replicas need Postgres (below); with SQLite this must be 1.
+  replicas: 2
   env:
     DB_PATH: "/data/platform.db"
     BASE_DOMAIN: "127.0.0.1.nip.io"
@@ -36,6 +37,11 @@ api:
     enabled: true
     size: 1Gi
     storageClassName: ""
+
+# Postgres, so the API runs two replicas like production (DESIGN §13.3). The first start copies the
+# old SQLite database in; to go back to SQLite set enabled: false (the SQLite volume is kept).
+postgres:
+  enabled: true
 
 dashboard:
   enabled: true

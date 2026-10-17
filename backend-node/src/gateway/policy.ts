@@ -24,12 +24,8 @@ export function defaultMinRole(annotations: Record<string, unknown> | undefined 
 }
 
 // Loads all policies once, so building a catalog of N tools is one query, not N.
-export function loadPolicy(db: Db) {
-  const rows = db.prepare(`select server_id, tool_name, min_role from tool_policies`).all() as {
-    server_id: string;
-    tool_name: string;
-    min_role: MinRole;
-  }[];
+export async function loadPolicy(db: Db) {
+  const rows = await db.all<{ server_id: string; tool_name: string; min_role: MinRole }>(`select server_id, tool_name, min_role from tool_policies`);
   const byKey = new Map(rows.map((r) => [`${r.server_id}\u0000${r.tool_name}`, r.min_role]));
   function decide(serverId: string, toolName: string, annotations?: Record<string, unknown> | null): { minRole: MinRole; source: PolicySource } {
     const exact = byKey.get(`${serverId}\u0000${toolName}`);

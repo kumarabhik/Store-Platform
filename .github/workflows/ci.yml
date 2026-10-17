@@ -36,6 +36,35 @@ jobs:
       # On Linux + Node 20 better-sqlite3 loads, so the SQLite suites run too (SYSTEM.md L13).
       - run: npm test
 
+  # The same suites against Postgres (DESIGN §13.3): every query must work on both databases.
+  backend-postgres:
+    name: Backend (tests on Postgres)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.10-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    defaults:
+      run:
+        working-directory: backend-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend-node/package-lock.json
+      - run: npm ci
+      - run: npm test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/test
+
   mcp-servers:
     name: MCP servers
     runs-on: ubuntu-24.04
@@ -129,7 +158,7 @@ jobs:
   images:
     name: Image build (${{ matrix.name }})
     runs-on: ubuntu-24.04
-    needs: [backend, mcp-servers, dashboard, helm]
+    needs: [backend, backend-postgres, mcp-servers, dashboard, helm]
     # packages: write is only used on version tags, to push to ghcr.io with the workflow's own token.
     permissions:
       contents: read

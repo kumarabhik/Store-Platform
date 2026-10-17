@@ -160,6 +160,21 @@ if kubectl get namespace backups >/dev/null 2>&1; then
   probe_labelled np-other "store-platform/backup-client=true" "$GARAGE:3903" blocked
 fi
 
+# Platform database (DESIGN §13.3): only platform-api and the nightly backup job connect to it.
+if kubectl -n platform get svc platform-postgres >/dev/null 2>&1; then
+  PG="platform-postgres.platform.svc.cluster.local:5432"
+  PG_IP="$(svc_ip platform platform-postgres):5432"
+  probe_gateway  "$PG" open
+  probe platform "$PG" blocked                                   # any other pod in platform
+  probe np-other "$PG" blocked                                   # another namespace
+  probe_from platform deploy/platform-dashboard "$PG_IP" blocked
+  probe_from "$NS" "deploy/${REL}-wordpress" "$PG_IP" blocked    # a store
+  # The backup job (pg_dump) may connect, when the platform backup is enabled at all.
+  if declare -F probe_labelled >/dev/null && kubectl -n platform get cronjob platform-api-backup >/dev/null 2>&1; then
+    probe_labelled platform "app=platform-api-backup" "$PG" open
+  fi
+fi
+
 # Between provisioned stores (bonus, DESIGN §11): set OTHER_ID to a second store's id. Store A's
 # pods must not reach store B at all, and B's own MCP server is still reachable by the gateway.
 if [ -n "${OTHER_ID:-}" ]; then

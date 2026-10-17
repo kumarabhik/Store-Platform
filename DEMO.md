@@ -55,7 +55,7 @@ Say:
   and the **dashboard** with the chat agent.
 - Everything that reaches an upstream goes through one function, `GatewayCore.callTool`: the
   external `/mcp` endpoint and the chat share it, so policy, timeouts and audit can't differ.
-- SQLite in one API replica for this round; Postgres + 2 replicas is designed (DESIGN §13.3).
+- Postgres behind two API replicas (`kubectl -n platform get pods`): any replica serves any call, one of them probes upstreams. The same code still runs on SQLite with one replica (DESIGN §13.3).
 
 ## 2. Definition of done, live, with two users (6 min)
 

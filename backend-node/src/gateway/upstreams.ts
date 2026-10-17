@@ -21,7 +21,8 @@ export interface UpstreamTarget {
   url: string;
   // Changes when the row changes (updated_at), so an edited URL or credential gets a new client.
   version: string;
-  headers: () => Record<string, string>;
+  // The gateway's own credential for this upstream; read when a new client is created.
+  headers: Record<string, string>;
 }
 
 interface Pooled {
@@ -48,7 +49,7 @@ export function createUpstreamPool(opts: { fetch?: FetchLike; maxInFlight?: numb
     const client = new Client({ name: "mcp-gateway", version: "0.1.0" });
     const transport = new StreamableHTTPClientTransport(new URL(t.url), {
       fetch: opts.fetch,
-      requestInit: { headers: t.headers() },
+      requestInit: { headers: t.headers },
     });
     const entry: Pooled = { version: t.version, client, connecting: client.connect(transport, { timeout: timeoutMs }) };
     // A failed handshake must not poison the pool: the next call starts fresh.

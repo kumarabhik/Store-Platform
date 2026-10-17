@@ -1,16 +1,105 @@
-
 import Database from "better-sqlite3";
 
+// One small async interface over SQLite and Postgres (DESIGN §13.3). Every query in the code goes
+// through it, written once in SQL both understand: `?` placeholders, `on conflict … do update`,
+// `returning`. The few things that differ are named fields here (now, inSeconds), not string rewrites.
+// SQLite stays the default (one file, nothing to run); DATABASE_URL=postgres://… switches to Postgres.
 
-export type Db = InstanceType<typeof Database>;
+export type Param = string | number | null;
 
+export interface Db {
+  readonly dialect: "sqlite" | "postgres";
+  // SQL for the current UTC time as "YYYY-MM-DD HH:MM:SS", the format of every *_at column.
+  readonly now: string;
+  // SQL for "now + ? seconds" in the same format; it takes one `?` parameter (the seconds).
+  readonly inSeconds: string;
+  all<T = Record<string, unknown>>(sql: string, ...params: Param[]): Promise<T[]>;
+  get<T = Record<string, unknown>>(sql: string, ...params: Param[]): Promise<T | undefined>;
+  run(sql: string, ...params: Param[]): Promise<{ changes: number }>;
+  // Several statements, no parameters (schema).
+  exec(sql: string): Promise<void>;
+  // All-or-nothing. `lock` serialises transactions that check-then-write the same rule across
+  // replicas (e.g. "is there still an admin?"); SQLite runs one transaction at a time anyway.
+  tx<T>(fn: (db: Db) => Promise<T>, lock?: string): Promise<T>;
+  close(): Promise<void>;
+}
 
+// Postgres when DATABASE_URL is a postgres:// URL, otherwise the SQLite file at sqlitePath.
+export async function openDatabase(databaseUrl: string | undefined, sqlitePath: string): Promise<Db> {
+  if (databaseUrl && /^postgres(ql)?:\/\//.test(databaseUrl)) {
+    const { openPostgres } = await import("./dbPostgres.js");
+    return openPostgres(databaseUrl);
+  }
+  return openDb(sqlitePath);
+}
+
+// ---- SQLite ----
 
 export function openDb(path: string): Db {
-  const db = new Database(path);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
+  const raw = new Database(path);
+  raw.pragma("journal_mode = WAL");
+  raw.pragma("foreign_keys = ON");
+  migrateSqlite(raw);
+  return sqliteDb(raw);
+}
 
+function sqliteDb(raw: InstanceType<typeof Database>): Db {
+  // better-sqlite3 is synchronous, so one statement never interleaves with another. A transaction
+  // spans several awaits, though: while one is open, queries from outside it wait until it ends,
+  // so they can't land inside it (and be rolled back with it).
+  let current: Promise<void> | null = null;
+
+  const make = (inTx: boolean): Db => {
+    // The wait and the statement must run in the same synchronous step: after an `await` returns,
+    // another transaction could otherwise begin before the statement runs.
+    const when = async <T>(statement: () => T): Promise<T> => {
+      if (!inTx) while (current) await current;
+      return statement();
+    };
+    const db: Db = {
+      dialect: "sqlite",
+      now: "datetime('now')",
+      inSeconds: "datetime('now', '+' || ? || ' seconds')",
+      all<T>(sql: string, ...params: Param[]) {
+        return when(() => raw.prepare(sql).all(...params) as T[]);
+      },
+      get<T>(sql: string, ...params: Param[]) {
+        return when(() => raw.prepare(sql).get(...params) as T | undefined);
+      },
+      run(sql, ...params) {
+        return when(() => ({ changes: raw.prepare(sql).run(...params).changes }));
+      },
+      exec(sql) {
+        return when(() => void raw.exec(sql));
+      },
+      async tx(fn) {
+        if (inTx) return fn(db);
+        while (current) await current;
+        let end!: () => void;
+        current = new Promise((resolve) => (end = resolve));
+        raw.exec("begin immediate");
+        try {
+          const result = await fn(make(true));
+          raw.exec("commit");
+          return result;
+        } catch (err) {
+          raw.exec("rollback");
+          throw err;
+        } finally {
+          current = null;
+          end();
+        }
+      },
+      async close() {
+        raw.close();
+      },
+    };
+    return db;
+  };
+  return make(false);
+}
+
+function migrateSqlite(db: InstanceType<typeof Database>) {
   db.exec(`
     create table if not exists stores (
       id text primary key,
@@ -102,18 +191,25 @@ export function openDb(path: string): Db {
       created_by text,
       foreign key(store_id) references stores(id) on delete cascade
     );
+
+    create table if not exists leader_lock (
+      name text primary key,
+      owner text not null,
+      lease_until text not null
+    );
   `);
 
-  try { db.exec(`alter table store_events add column actor text;`); } catch {}
-  try { db.exec(`alter table stores add column created_by text;`); } catch {}
-  try { db.exec(`alter table stores add column name text;`); } catch {}
-  try { db.exec(`alter table stores add column user_id text;`); } catch {}
-  try { db.exec(`alter table stores add column custom_domain text;`); } catch {}
-  try { db.exec(`alter table stores add column domain_status text;`); } catch {}
-  try { db.exec(`alter table stores add column domain_last_error text;`); } catch {}
-  try { db.exec(`alter table stores add column last_backup_at text;`); } catch {}
+  // Columns added after the first release (additive only, SYSTEM.md I10).
+  const addColumn = (table: string, column: string, type: string) => {
+    const cols = (db.prepare(`pragma table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes(column)) db.exec(`alter table ${table} add column ${column} ${type};`);
+  };
+  addColumn("store_events", "actor", "text");
+  for (const c of ["created_by", "name", "user_id", "custom_domain", "domain_status", "domain_last_error", "last_backup_at", "lease_owner", "lease_until"]) {
+    addColumn("stores", c, "text");
+  }
 
-  migrateGateway(db);
+  migrateGateway(db, addColumn);
 
   db.exec(`
     create index if not exists idx_store_events_store_ts on store_events(store_id, ts desc);
@@ -126,16 +222,14 @@ export function openDb(path: string): Db {
     create unique index if not exists idx_billing_invoices_external on billing_invoices(provider, external_id);
     create index if not exists idx_store_backups_store_started on store_backups(store_id, started_at desc);
   `);
-
-  return db;
 }
 
 // MCP gateway schema (DESIGN §5). Additive only (SYSTEM.md I10): new tables and new columns, so an
 // older image still runs against this database after a `helm rollback`.
-function migrateGateway(db: Db) {
+function migrateGateway(db: InstanceType<typeof Database>, addColumn: (table: string, column: string, type: string) => void) {
   // Source of truth for roles (team/members.ts). ADMIN_EMAILS still promotes on login.
-  try { db.exec(`alter table users add column role text not null default 'member' check (role in ('admin','member'));`); } catch {}
-  try { db.exec(`alter table users add column disabled_at text;`); } catch {}
+  addColumn("users", "role", "text not null default 'member' check (role in ('admin','member'))");
+  addColumn("users", "disabled_at", "text");
 
   db.exec(`
     create table if not exists invites (
@@ -222,6 +316,16 @@ function migrateGateway(db: Db) {
       args_preview text
     );
 
+    -- Pending "may the chat run this tool?" questions (P10). In the database, not in memory, so the
+    -- Approve click can reach any API replica, not only the one streaming the chat (DESIGN §13.3).
+    create table if not exists chat_approvals (
+      id text primary key,
+      user_id text not null,
+      decision text check (decision in ('approved','declined')),
+      created_at text not null default (datetime('now')),
+      decided_at text
+    );
+
     create index if not exists idx_api_keys_user on api_keys(user_id, created_at desc);
     create index if not exists idx_invites_email on invites(email);
     create index if not exists idx_audit_ts on audit_log(ts desc);
@@ -229,15 +333,9 @@ function migrateGateway(db: Db) {
   `);
 }
 
-export function addEvent(
-  db: Db,
-  storeId: string,
-  type: string,
-  msg?: string,
-  actor?: string
-) {
-  db.prepare(
-    `insert into store_events (store_id, ts, type, message, actor)
-     values (?, datetime('now'), ?, ?, ?)`
-  ).run(storeId, type, msg ?? null, actor ?? null);
+export async function addEvent(db: Db, storeId: string, type: string, msg?: string, actor?: string) {
+  await db.run(
+    `insert into store_events (store_id, ts, type, message, actor) values (?, ${db.now}, ?, ?, ?)`,
+    storeId, type, msg ?? null, actor ?? null,
+  );
 }

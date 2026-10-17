@@ -24,6 +24,7 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 | I11 | **Desired state goes in the DB first; slow infra work happens in the reconciler**, never inside an HTTP request. | Core design of the provisioner. Survives restarts and retries cleanly. |
 | I12 | **Retries use exponential backoff with a cap (and jitter)**, never a fixed short interval. | See L1. Applies to the provisioner, the upstream health checker, and any polling loop. |
 | I13 | **Role checks happen on the server for every admin route.** Hiding a button in the UI is not authorization. | Member must not be able to escalate by calling the API directly. |
+| I14 | **A check-then-write is decided by the database**: a unique index (`on conflict do nothing`), a conditional `update … where`, or `db.tx(…, lock)`. Never "select, then insert" in code. | Two API replicas run at once (DESIGN §13.3, L50). |
 
 ---
 
@@ -283,6 +284,51 @@ How to add an entry: use the template at the bottom. Keep entries short. Always 
 - **Cause:** for a cross-origin `fetch`, browsers expose only a few "safe" response headers unless the server lists the rest in `Access-Control-Expose-Headers`.
 - **Fix:** `exposedHeaders` in the CORS setup ([server.ts](backend-node/src/server.ts)). Checked with an `Origin:` header.
 
+### L50 — Code that was correct only because SQLite is synchronous
+- **Symptom:** none yet; found while moving to Postgres (DESIGN §13.3). Comments like "Node runs this synchronously against SQLite, so two first signups can't both win" were true only for one process with a synchronous driver.
+- **Cause:** with an async driver and two replicas, "check, then write" (first admin, last admin, invite used once, store lease) can interleave between requests.
+- **Fix:** those steps run in `db.tx(…, "team")` (Postgres advisory lock); the lease re-checks itself in the outer `WHERE`; inserts that must be unique rely on the unique index (`on conflict do nothing`) instead of a check first. Test: five simultaneous first signups → one admin, on both databases.
+- **Carry forward:** a check-then-write is a race as soon as there are two writers. Let the database decide (unique index, conditional update, lock).
+
+### L51 — The chat told the browser before the approval row existed
+- **Symptom:** the Postgres test run failed "Decline …" with a timeout; SQLite passed.
+- **Cause:** the agent emitted `approval_required` and only then inserted the pending row. A fast answer (5 ms in the test; the slower Postgres insert made the gap visible) found no row and was lost.
+- **Fix:** `approvals.open()` creates the row before the event is sent, then `wait()` ([approval.ts](backend-node/src/chat/approval.ts)).
+- **Carry forward:** create the state an answer will land in before asking the question. Running the same tests on a second database is a cheap way to shake out timing bugs.
+
+### L52 — In a container every replica is PID 1
+- **Symptom:** none yet; found while reading the reconciler for two replicas. The store lease owner was `reconciler-${process.pid}`.
+- **Cause:** `node dist/server.js` is PID 1 in every pod, so two replicas had the same owner name and could each "own" the other's lease.
+- **Fix:** owner = `reconciler-<hostname>-<pid>` ([provisioner.ts](backend-node/src/provisioner.ts)); the leader lock already used the hostname.
+
+### L53 — resume.ps1 deployed the new chart with the old image
+- **Symptom:** after adding Postgres to the chart, `ops/resume.ps1` (which runs `helm upgrade`) rolled out pods that stayed in `Init:CrashLoopBackOff`; the rollout timed out, the old pods kept serving.
+- **Cause:** the chart (Postgres, `dist/importSqlite.js` init container) was applied before the API image that contains the import script was built.
+- **Fix:** build the image, then roll. The design held: the init container failing kept the pod from starting on an empty database (where the next signup would become admin), and `maxUnavailable: 0` kept the old pods serving.
+- **Carry forward:** when a chart change needs new code, `ops/up.ps1` (builds, then upgrades), not `resume.ps1`. A guard that fails closed is what makes this kind of mistake harmless.
+
+### L54 — Postgres returns `count(*)` and bigint ids as strings
+- **Symptom:** (avoided) `count(*) as n` compared with `0` would be `"0" !== 0` on Postgres.
+- **Cause:** node-postgres returns int8 and numeric as strings, because they can exceed JavaScript's safe integers.
+- **Fix:** type parsers in [dbPostgres.ts](backend-node/src/dbPostgres.ts) turn int8/numeric into numbers; every count and id here fits.
+
+### L55 — `kubectl cp` read the drive letter as a pod name
+- **Symptom:** `kubectl cp pod:/data/x.db C:/…/x.db` → "one of src or dest must be a local file specification".
+- **Cause:** `C:` looks like `pod:path`.
+- **Fix:** `cd` into the target folder and give a relative destination.
+
+### L56 — A database timeout in a timer callback killed the API pod
+- **Symptom:** with minikube and the k3s test cluster running side by side, one API replica went into `CrashLoopBackOff`: `Error: Connection terminated due to connection timeout … at Timeout._onTimeout (dist/provisioner.js)`.
+- **Cause:** the reconciler's `setInterval(async () => { try … finally … })` had no `catch`. A rejected promise in a timer is an unhandled rejection, and Node exits on it. With SQLite those queries could not fail this way; a network database can.
+- **Fix:** the tick catches, logs which component failed and retries on the next tick ([provisioner.ts](backend-node/src/provisioner.ts)). The other timers already did (`runDue().catch`, `tryAcquireLeader(...).catch`).
+- **Carry forward:** every async callback that nothing awaits (timers, event handlers) needs its own `catch`. Check: `grep -n "setInterval(async\|setTimeout(async" src`.
+
+### L57 — Production never backed up the platform database
+- **Symptom:** the k3s isolation run expected the backup job to reach Postgres and found it blocked; there was no backup policy because there was no backup CronJob.
+- **Cause:** `backup.enabled` was set only in values-local. deploy.sh installed the backup store and copied its Secret, but the platform chart never used it in production: users, keys and audit had no nightly copy.
+- **Fix:** `backup.enabled: true` in values-prod.yaml; the isolation check for the backup job now runs only where the CronJob exists.
+- **Carry forward:** a test that expects "open" finds missing features too, not just leaks.
+
 ---
 
 ## 3. Gotchas discovered during research (apply them before you hit them)
@@ -322,6 +368,7 @@ Several clients (including Claude's API) require tool names to match `^[a-zA-Z0-
 ### G9 — SQLite + PVC = single replica, and rolling updates can deadlock
 SQLite is a single-writer file on a `ReadWriteOnce` PVC. With the default `RollingUpdate`, the new pod may wait forever for the volume (multi-node) or two processes may write at once.
 - **Fix:** platform-api `replicas: 1`, `strategy: Recreate` while on SQLite. Scaling (S7) requires Postgres first.
+- **Update 2026-10-15:** done. With `postgres.enabled` (local and prod values) the API keeps nothing on disk and runs 2 replicas with `RollingUpdate` (`maxUnavailable: 0`) and a PodDisruptionBudget. With SQLite, `api.replicas` must stay 1.
 
 ### G10 — CRLF line endings break shell scripts in containers / on the VPS
 Git on Windows warns `LF will be replaced by CRLF`. A `.sh` with CRLF fails on Linux with `/bin/sh^M: bad interpreter`.
@@ -383,13 +430,17 @@ Every line below was run, not just written. Dates are when it last passed; ROADM
 ### Tests and checks
 | What | Result | How to show it |
 |---|---|---|
-| Backend tests (gateway, team, chat, approvals, store registration, metrics, search, backup keys, audit CSV) | 113/113 | `bash scripts/test-backend.sh` |
+| Backend tests (gateway, team, chat, approvals, store registration, metrics, search, backup keys, audit CSV) | 118 on SQLite **and** 118 on Postgres (one test per side is dialect-only) | `bash scripts/test-backend.sh [--postgres]` | `bash scripts/test-backend.sh` |
 | woo-mcp tests (OAuth 1.0a signer with vectors from WooCommerce's own PHP, 9 tools) | 27/27 | `npm --prefix mcp-servers/woo-mcp test` |
 | notes-mcp tests | 6/6 | `npm --prefix mcp-servers/notes-mcp test` |
 | CI on GitHub (tests, lint, Helm for 5 charts × local/prod, all 6 images) | 12/12 jobs green | GitHub → Actions |
 | Kubernetes schema check of every rendered manifest (kubeconform, strict, incl. Prometheus CRDs) | 335/335 valid, 0 skipped | CI `helm` job |
 | Per-store backup keys | store key: own bucket 200, shared bucket read 403, write 403; delete → key revoked, bucket kept | `backup-store.test.ts`; DESIGN §13.6 |
 | Pre-recording check | 17/17 PASS; fails with a hint when the port-forward is down | `bash scripts/preflight.sh` |
+| SQLite → Postgres move (live data) | one pod copied, the other skipped (lock): users 5, keys 19, servers 4, stores 1, tools 34, policies 4, audit 92: equal to the SQLite backup | API pod init container `import-sqlite` logs |
+| Two API replicas, one deleted under load | 60/60 `tools/list` calls OK while the leader pod was deleted; new leader probing 20 s later | DESIGN §13.3 |
+| Rolling restart / database restart | 43/43 calls OK during `rollout restart`; Postgres pod deleted: 2 calls failed, back after 9 s, API pods not restarted | DESIGN §13.3, L56 |
+| Platform database backup | `pg_dump` uploaded (`platform/Thu.dump`); restored into a scratch database: users, keys, audit, servers equal | `kubectl -n platform create job --from=cronjob/platform-api-backup …` |
 | Definition of done, end to end (two users, chat + external client, permissions, approval, disable/kill/revoke, audit) | 19/19 on minikube **and** on k3s | `bash scripts/dod.sh` |
 | Network isolation (real connections, positive and negative, ingress and egress, store-to-store, backup store) | 40/40 on minikube **and** on k3s (3 runs in a row) | `bash scripts/verify-store-isolation.sh` |
 | Restore drill (fresh backup → scratch database → counts compared) | passed on two stores (10 orders/13 products; 2/4) | `bash scripts/restore-drill.sh` |
@@ -406,6 +457,8 @@ Every line below was run, not just written. Dates are when it last passed; ROADM
 - **Rollback:** `helm rollback platform 10` (a revision without the metrics port) → healthy → `helm upgrade --atomic` forward again.
 - **Search mode for many tools:** tool definitions sent per chat turn went from 16 796 bytes (28 tools) to 1 001 bytes (-94%), and the chat still answered "orders today" (search → call).
 - **Audit CSV:** a member asked for everyone's rows and got only their own 46; the admin's `outcome=denied` export had 11 rows.
+- **Approve on the other pod:** with two replicas the chat stream ran on one pod and the Approve click landed on the other (pod logs); it worked because pending approvals live in the database.
+- **Kill the API leader:** 60 MCP calls during the deletion, 0 failed; the other replica took over upstream probing within 20 s.
 - **Merchant tools:** "sales today" → `sales_summary` (8 orders, ₹3,792, no approval needed: read-only); "refund ₹1 on order 34" → approval card → refund recorded.
 
 ### Bugs the checks caught (shows the testing is real)
@@ -429,6 +482,7 @@ Every line below was run, not just written. Dates are when it last passed; ROADM
 | Chat loop | ≤ 8 tool rounds, 120 s, ≤ 4 parallel calls, approvals time out after 60 s |
 | Backups | nightly, 7 days kept (Mon…Sun + latest), every store + platform DB |
 | Alerts | 5 rules: upstream down, error rate, latency, failed provisioning, backup missing |
+| API replicas / database | 2 / Postgres 17 (SQLite still works with 1 replica) |
 
 ---
 

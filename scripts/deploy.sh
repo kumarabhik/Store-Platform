@@ -39,6 +39,7 @@ need_secret() {  # need_secret <namespace> <name> <how to create it>
 }
 need_secret platform gateway-enc-key \
   'kubectl -n platform create secret generic gateway-enc-key --from-literal=key=$(openssl rand -base64 32)   # back it up!'
+need_secret platform platform-postgres   'kubectl -n platform create secret generic platform-postgres --from-literal=password=$(openssl rand -hex 24)   # back it up with the database'
 need_secret platform platform-api-env \
   'kubectl -n platform create secret generic platform-api-env --from-literal=LLM_API_KEY=<groq key> --from-literal=ADMIN_API_KEY=$(openssl rand -hex 24)'
 need_secret store-default store-default-credentials \

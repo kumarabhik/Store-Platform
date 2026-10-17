@@ -80,7 +80,7 @@ Credentials for the LLM and admin tools go in the repo root `.env.local` (for ex
 | `bash scripts/verify-store.sh [--persistence]` | Storefront → cart → COD checkout → order in WooCommerce; with `--persistence`, deletes the WordPress and MariaDB pods and checks the order survives |
 | `bash scripts/verify-store-isolation.sh` | 40 real connections against the NetworkPolicies, ingress and egress, positive and negative, incl. the backup store. `NS=store-<a> REL=wc-<a> OTHER_ID=<b>` also checks store-to-store isolation |
 | `bash scripts/restore-drill.sh [release] [namespace]` | Takes a fresh backup, restores it into a scratch database and compares orders and products with the live store |
-| `bash scripts/test-backend.sh` | All backend tests (113) in Node 20; `npm --prefix backend-node test` runs the non-SQLite ones on the host |
+| `bash scripts/test-backend.sh [--postgres]` | All backend tests (118) in Node 20, on SQLite or on a throwaway Postgres; CI runs both. `npm --prefix backend-node test` runs the database-free ones on the host |
 | `npm --prefix mcp-servers/woo-mcp test`, `npm --prefix mcp-servers/notes-mcp test` | The MCP servers |
 | `npm --prefix dashboard run build` / `run lint` | The dashboard |
 
@@ -132,7 +132,7 @@ gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed H
 |---|---|---|
 | **Bonus: multi-store provisioning** | Done: create/delete from the dashboard, namespace per store with its own DB, Secrets, PVCs, Ingress, quota and limits, default-deny network; each store's own woo-mcp auto-registered as `store_<id>`; deletion removes the tools first; survives an API restart mid-install | `backend-node/src/provisioner.ts`, `gateway/storeServers.ts`, `charts/store-woocommerce` (baked into the `store-chart` image); DESIGN §11 |
 | Security hardening (#6) | SSRF guard, upstream credentials encrypted at rest (AES-256-GCM), default-deny NetworkPolicies in every namespace (ingress + egress), non-root everywhere, no token passthrough, pinning, narrow install role (rows below) | `gateway/ssrf.ts`, `gateway/crypto.ts`, `charts/*/templates/networkpolicy.yaml`; THREAT_MODEL.md |
-| Scaling (#7) | Stateless gateway (new MCP server per request, no sessions); per-key rate limit and per-upstream bulkhead. Multiple replicas need Postgres first | `gateway/mcpEndpoint.ts`, `gateway/upstreams.ts` |
+| Scaling (#7) | Postgres and 2 API replicas: stateless gateway (new MCP server per request, no sessions), chat approvals in the database, one replica probes upstreams (leader lease); rolling updates and a PodDisruptionBudget. Deleting a pod under load: 60/60 calls OK. Per-key rate limit and per-upstream bulkhead (limits are per pod) | `src/db.ts`, `dbPostgres.ts`, `templates/postgres.yaml`, DESIGN §13.3 |
 | Observability (#8) | Every failure names the server and the cause (API, dashboard, audit log); Prometheus metrics per server/tool/outcome, latency histogram, upstream up, on an in-cluster port (9464) | `gateway/metrics.ts`, `gateway/health.ts`, Servers page |
 | Upgrades and rollback (#9) | `--atomic` installs, rollback run live (revision 10 → back to 13), additive migrations | `scripts/deploy.sh`, section 4 |
 | VPS (#1, part) | Deploy script and Traefik prod values; not yet run on a real VPS | `scripts/deploy.sh`, `values-prod.yaml` |
@@ -147,7 +147,7 @@ gateway (platform-api) --Bearer mcp-token--> woo-mcp :3000 --OAuth 1.0a signed H
 | Tool-definition pinning (#6) | A changed tool is hidden until an admin approves it ("Approve changes") | `gateway/health.ts`, `catalog.ts`, Servers page |
 | Least-privilege installs (#6) | Store Helm jobs run non-root under a narrow `store-installer` role, not `admin` | `charts/platform/templates/api-rbac.yaml`, `kube.ts` |
 
-Not built yet: OAuth on the gateway (#3), hosted MCP servers (#5), multiple API replicas (needs Postgres, #7), a real VPS run with TLS (#1). ROADMAP.md tracks each one.
+Not built yet: OAuth on the gateway (#3), hosted MCP servers (#5), a real VPS run with TLS (#1). ROADMAP.md tracks each one.
 
 ## 7. Troubleshooting
 
@@ -169,7 +169,7 @@ Not built yet: OAuth on the gateway (#3), hosted MCP servers (#5), multiple API 
 | `backend-node/src/chat/` | Chat agent: OpenAI-compatible client, tool loop, SSE route |
 | `backend-node/src/team/` | Members, invites, roles |
 | `backend-node/src/provisioner.ts`, `kube.ts`, `engine.ts`, `lease.ts`, `leader.ts` | Store provisioning (bonus): reconciler, Kubernetes helpers, per-store values, leases |
-| `backend-node/src/server.ts`, `auth.ts`, `db.ts` | Fastify app, sessions/passwords, SQLite schema and migrations |
+| `backend-node/src/server.ts`, `auth.ts`, `db.ts`, `dbPostgres.ts`, `importSqlite.ts` | Fastify app, sessions/passwords, the database layer (SQLite or Postgres, same SQL), and the one-time SQLite → Postgres move |
 | `mcp-servers/woo-mcp`, `notes-mcp`, `everything-mcp` | The upstream MCP servers |
 | `dashboard/src/` | React app: `App.tsx` (auth + navigation), `pages/*` (one per page), `lib/*` |
 | `charts/platform`, `charts/store-woocommerce`, `charts/mcp-upstreams` | The three application charts; `values-local.yaml` / `values-prod.yaml` hold every environment difference |

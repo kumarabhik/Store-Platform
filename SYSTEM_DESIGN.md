@@ -73,13 +73,12 @@ Short note for reviewers. The full design (research, data model, every decision)
 
 ## Built, and what comes next
 
-**Built and verified** (ROADMAP has the proof for each): the gateway and chat, three upstreams plus one MCP server per provisioned store, roles, invites, keys and audit, per-tool permissions, human approval in the chat, tool-definition pinning, search mode, default-deny networking, a narrow install role, monitoring (Prometheus, Grafana, alerts), nightly backups with a passing restore drill, merchant tools (sales summary, low stock, refunds), rollback, and CI on every push.
+**Built and verified** (ROADMAP has the proof for each): the gateway and chat, three upstreams plus one MCP server per provisioned store, roles, invites, keys and audit, per-tool permissions, human approval in the chat, tool-definition pinning, search mode, default-deny networking, a narrow install role, monitoring (Prometheus, Grafana, alerts), nightly backups with a passing restore drill, merchant tools (sales summary, low stock, refunds), Postgres behind two API replicas (one leader probes upstreams, chat approvals in the database, rolling updates without downtime), rollback, and CI on every push (tests on SQLite and on Postgres).
 
 **Planned before submission** (designed in [DESIGN.md §13](DESIGN.md#13-production-readiness-plan-p10-before-the-2026-10-26-submission)):
 
 | Step | Why it matters |
 |---|---|
-| Postgres instead of SQLite, then 2 API replicas | SQLite allows one pod, so every deploy is downtime |
 | VPS + HTTPS (cert-manager, Let's Encrypt) | A live URL; exercises the production values for real |
 
 **Later:** split the provisioner into its own Deployment, CloudNativePG for failover, OAuth on the gateway, hosted MCP servers, embeddings for tool search.

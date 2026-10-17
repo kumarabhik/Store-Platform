@@ -689,6 +689,15 @@ The required work, the bonus and most stand-outs are built and verified (ROADMAP
 
 **Verification:** all backend tests on SQLite and on Postgres in CI; `dod.sh` with 2 replicas; delete one API pod in the middle of a chat and a provisioning run, and both finish; row counts match after the data move.
 
+**As built** (owner approved Postgres, 2026-10-15):
+- **No Kysely.** A small async `Db` interface (`src/db.ts`: `all/get/run/exec/tx`) with a SQLite and a Postgres implementation (`src/dbPostgres.ts`, `pg` 8.16.3). Why: the queries were already plain SQL; rewriting 117 of them in a query builder would have doubled the change and hidden the SQL. Every query is written once in SQL both databases accept (`?` placeholders, `on conflict … do update`, `returning`); the few real differences are named fields (`db.now`, `db.inSeconds`), not text rewrites. The only translation is `?` → `$1…` for Postgres.
+- **Timestamps stay text** in SQLite's `YYYY-MM-DD HH:MM:SS` UTC format on Postgres too, so API answers, comparisons and the dashboard are identical. `timestamptz` would be a later, additive change.
+- **Things that were safe only because SQLite is synchronous** now take a lock: first-admin signup, the last-admin rule and invite acceptance run in `db.tx(…, "team")` (a Postgres advisory lock). Test: five simultaneous first signups → exactly one admin, on both databases. The store lease re-checks itself in the outer `WHERE`, and its owner name includes the pod's hostname (every container is PID 1).
+- **Two replicas:** chat approvals moved to a `chat_approvals` table (the stream polls with backoff, 100 → 500 ms); the health checker and Helm seeding run on the replica holding the `gateway` lease (15 s, renewed every 5 s), and it re-probes a server whose `updated_at` changed, wherever the edit happened. Rate limits and metrics stay per pod, as planned.
+- **Chart:** `postgres` StatefulSet (`postgres:17.10-alpine`, uid 70, read-only root, startup/readiness/liveness `pg_isready`, PVC), password in a generated-and-kept Secret (prod: `existingSecret`), `DATABASE_URL` built in the pod from `secretKeyRef` via `$(DATABASE_PASSWORD)`, NetworkPolicy admitting only platform-api and the backup job; API `RollingUpdate` with `maxUnavailable: 0` and a PodDisruptionBudget. The nightly backup uses `pg_dump -Fc`.
+- **Data move without a manual step:** an init container (`dist/importSqlite.js`) copies the SQLite file into Postgres while Postgres has no users, under a lock, checks row counts, and otherwise does nothing. If it fails, the pod does not start, instead of serving an empty database where the next signup would become admin. The SQLite volume is kept (`helm.sh/resource-policy: keep`) as the way back.
+- **Way back:** `postgres.enabled: false` (and `api.replicas: 1`) in values-local, or `helm rollback`; the SQLite file is untouched by the move.
+
 ### 13.4 Production on a VPS with HTTPS
 **Why:** a reviewer can open a real URL, and production-only differences get exercised instead of described.
 

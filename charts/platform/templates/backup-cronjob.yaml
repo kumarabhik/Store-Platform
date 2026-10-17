@@ -1,8 +1,8 @@
-{{- if and .Values.backup.enabled .Values.api.persistence.enabled }}
+{{- if and .Values.backup.enabled (or .Values.postgres.enabled .Values.api.persistence.enabled) }}
 # Nightly backup of the platform database (users, keys, servers, audit log) to the backup store
-# (DESIGN §13.6). better-sqlite3's online backup gives a consistent copy while the API keeps
-# writing; it runs with the API's own image, so no extra tool is needed. Same weekday naming as
-# the store backups (Mon..Sun + latest).
+# (DESIGN §13.6). Postgres: pg_dump in custom format (compressed, restorable table by table).
+# SQLite: better-sqlite3's online backup, with the API's own image. Both give a consistent copy
+# while the API keeps writing. Same weekday naming as the store backups (Mon..Sun + latest).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -33,6 +33,30 @@ spec:
             runAsGroup: 10001
             seccompProfile: { type: RuntimeDefault }
           initContainers:
+            {{- if .Values.postgres.enabled }}
+            - name: dump
+              image: {{ .Values.postgres.image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "-c", "pg_dump -Fc -f /backup/platform.dump && echo 'backup written'"]
+              env:
+                - { name: PGHOST, value: {{ include "platform.postgresName" . | quote }} }
+                - { name: PGUSER, value: {{ .Values.postgres.user | quote }} }
+                - { name: PGDATABASE, value: {{ .Values.postgres.database | quote }} }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "platform.postgresSecret" . }}
+                      key: password
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits: { memory: 256Mi }
+              volumeMounts:
+                - { name: backup, mountPath: /backup }
+            {{- else }}
             - name: dump
               image: {{ .Values.api.image | quote }}
               imagePullPolicy: IfNotPresent
@@ -56,6 +80,7 @@ spec:
               volumeMounts:
                 - { name: data, mountPath: /data, readOnly: true }
                 - { name: backup, mountPath: /backup }
+            {{- end }}
           containers:
             - name: upload
               image: {{ .Values.backup.curlImage | quote }}
@@ -64,11 +89,17 @@ spec:
               args:
                 - |
                   set -eu
-                  gzip -c /backup/platform.db > /tmp/platform.db.gz
+                  # A pg_dump file is compressed already; the SQLite copy is gzipped here.
+                  if [ -f /backup/platform.dump ]; then
+                    file=/backup/platform.dump; ext=dump
+                  else
+                    gzip -c /backup/platform.db > /tmp/platform.db.gz
+                    file=/tmp/platform.db.gz; ext=db.gz
+                  fi
                   for name in $(date +%a) latest; do
                     curl -fsS --aws-sigv4 "aws:amz:$S3_REGION:s3" --user "$S3_KEY_ID:$S3_SECRET" \
-                      -T /tmp/platform.db.gz "$S3_ENDPOINT/$S3_BUCKET/platform/$name.db.gz"
-                    echo "uploaded platform/$name.db.gz"
+                      -T "$file" "$S3_ENDPOINT/$S3_BUCKET/platform/$name.$ext"
+                    echo "uploaded platform/$name.$ext"
                   done
               env:
                 - { name: S3_ENDPOINT, valueFrom: { secretKeyRef: { name: {{ .Values.backup.s3SecretName }}, key: endpoint } } }
@@ -87,9 +118,11 @@ spec:
                 - { name: backup, mountPath: /backup, readOnly: true }
                 - { name: tmp, mountPath: /tmp }
           volumes:
+            {{- if not .Values.postgres.enabled }}
             - name: data
               persistentVolumeClaim:
                 claimName: {{ include "platform.apiName" . }}-pvc
+            {{- end }}
             - name: backup
               emptyDir: { sizeLimit: 1Gi }
             - name: tmp

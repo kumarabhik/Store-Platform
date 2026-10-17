@@ -4,6 +4,10 @@ metadata:
   name: {{ include "platform.apiName" . }}
 spec:
   replicas: {{ .Values.api.replicas }}
+  # A new pod must be Ready before an old one stops, so a deploy causes no downtime.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
     matchLabels:
       app: {{ include "platform.apiName" . }}
@@ -21,6 +25,29 @@ spec:
           type: RuntimeDefault
         fsGroup: 10001
         fsGroupChangePolicy: "OnRootMismatch"
+      {{- if and .Values.postgres.enabled .Values.api.persistence.enabled .Values.postgres.importSqlite }}
+      initContainers:
+        # One-time move from SQLite: copies the old database into Postgres while Postgres has no
+        # users yet, and does nothing afterwards (src/importSqlite.ts). If it fails the pod doesn't
+        # start, instead of serving an empty database where the next signup would become admin.
+        - name: import-sqlite
+          image: {{ .Values.api.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "dist/importSqlite.js", {{ .Values.api.env.DB_PATH | quote }}]
+          env:
+            {{- include "platform.databaseEnv" . | nindent 12 }}
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: sqlite, mountPath: /data }
+      {{- end }}
       containers:
         - name: api
           image: {{ .Values.api.image | quote }}
@@ -41,6 +68,10 @@ spec:
             # Lets provisioned store namespaces allow their Helm job to reach the API server (DESIGN §10.2.2).
             - name: KUBE_API_ENDPOINTS
               value: {{ include "platform.apiServerEndpoints" . | quote }}
+            {{- if .Values.postgres.enabled }}
+            # The platform database (DESIGN §13.3); without it the API uses SQLite at DB_PATH.
+            {{- include "platform.databaseEnv" . | nindent 12 }}
+            {{- end }}
             # Encrypts upstream MCP credentials at rest (gateway/crypto.ts).
             - name: GATEWAY_ENC_KEY
               valueFrom:
@@ -87,13 +118,19 @@ spec:
             capabilities:
               drop: ["ALL"]
       volumes:
+        # With Postgres the API keeps nothing on disk, so any number of replicas can run on any node.
         - name: data
-          {{- if .Values.api.persistence.enabled }}
+          {{- if and .Values.api.persistence.enabled (not .Values.postgres.enabled) }}
           persistentVolumeClaim:
             claimName: {{ include "platform.apiName" . }}-pvc
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if and .Values.postgres.enabled .Values.api.persistence.enabled .Values.postgres.importSqlite }}
+        - name: sqlite
+          persistentVolumeClaim:
+            claimName: {{ include "platform.apiName" . }}-pvc
+        {{- end }}
 
 ---
 {{- if .Values.api.persistence.enabled }}
@@ -101,6 +138,10 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "platform.apiName" . }}-pvc
+  annotations:
+    # The SQLite file stays when the API moves to Postgres (or the chart is removed): it is the way
+    # back with `helm rollback`, and nothing in the chart may delete data (AGENTS.md Rule 8).
+    helm.sh/resource-policy: keep
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:

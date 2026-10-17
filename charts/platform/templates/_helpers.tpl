@@ -39,3 +39,27 @@ install time. Empty under `helm template` (no cluster); the API then falls back 
 {{- define "platform.storeInstallerRole" -}}
 {{ include "platform.name" . }}-store-installer
 {{- end -}}
+
+{{/* Platform database (DESIGN §13.3). */}}
+{{- define "platform.postgresName" -}}
+{{ include "platform.name" . }}-postgres
+{{- end -}}
+
+{{- define "platform.postgresSecret" -}}
+{{ .Values.postgres.existingSecret | default (include "platform.postgresName" .) }}
+{{- end -}}
+
+{{/*
+DATABASE_URL for the API and its init container. The password comes from the Secret through the
+DATABASE_PASSWORD variable defined just before it (Kubernetes expands $(VAR) in env values), so it
+is never written into values or the manifest.
+*/}}
+{{- define "platform.databaseEnv" -}}
+- name: DATABASE_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "platform.postgresSecret" . }}
+      key: password
+- name: DATABASE_URL
+  value: "postgres://{{ .Values.postgres.user }}:$(DATABASE_PASSWORD)@{{ include "platform.postgresName" . }}:5432/{{ .Values.postgres.database }}"
+{{- end -}}

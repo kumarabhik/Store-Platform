@@ -49,7 +49,7 @@ export async function seedOne(registry: Registry, entry: SeedEntry, readSecret: 
     credential,
     timeout_ms: entry.timeout_ms,
   };
-  const existing = registry.getBySlug(entry.slug);
+  const existing = await registry.getBySlug(entry.slug);
   if (existing && existing.managed_by !== "helm") return "skipped";
   if (existing) {
     await registry.update(existing.id, fields);
@@ -57,7 +57,7 @@ export async function seedOne(registry: Registry, entry: SeedEntry, readSecret: 
   }
   const created = await registry.create({ slug: entry.slug, ...fields }, "helm");
   // Only when the server is new: re-applying on every start would undo an admin who reset a tool to default.
-  registry.ensureToolPolicies(created.id, entry.tool_policies);
+  await registry.ensureToolPolicies(created.id, entry.tool_policies);
   return "created";
 }
 
@@ -78,7 +78,7 @@ export function startSeeding(
     if (stopped) return;
     try {
       const result = await seedOne(registry, entry, readSecret);
-      const server = registry.getBySlug(entry.slug);
+      const server = await registry.getBySlug(entry.slug);
       if (server) health.reschedule(server.id);
       log.info({ slug: entry.slug, result }, "gateway seed server");
     } catch (err) {

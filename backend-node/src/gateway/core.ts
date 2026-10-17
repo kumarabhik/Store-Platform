@@ -73,8 +73,8 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
     return v;
   }
 
-  function findTool(user: GatewayUser, exposedName: string, args?: Record<string, unknown>): CatalogEntry | undefined {
-    const visible = catalog(user.role);
+  async function findTool(user: GatewayUser, exposedName: string, args?: Record<string, unknown>): Promise<CatalogEntry | undefined> {
+    const visible = await catalog(user.role);
     if (searchMode(visible)) {
       if (exposedName === CALL_TOOL) return visible.find((e) => e.exposedName === String(args?.name ?? ""));
       return META_TOOLS.find((e) => e.exposedName === exposedName);
@@ -84,13 +84,13 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
 
   // A search over the tools this user may see. Audited like any call (I2), although it never
   // reaches an upstream.
-  function runSearch(user: GatewayUser, visible: CatalogEntry[], args: Record<string, unknown> | undefined, ctx: CallContext): CallToolResult {
+  async function runSearch(user: GatewayUser, visible: CatalogEntry[], args: Record<string, unknown> | undefined, ctx: CallContext): Promise<CallToolResult> {
     const started = performance.now();
     const query = typeof args?.query === "string" ? args.query.slice(0, 200) : "";
     const limit = Number.isInteger(args?.limit) ? Number(args!.limit) : 5;
     const found = query.trim() ? searchTools(visible, query, limit) : [];
     const tools = found.map((e) => ({ name: e.exposedName, description: e.description, inputSchema: e.inputSchema }));
-    writeAudit(db, {
+    await writeAudit(db, {
       requestId: ctx.requestId ?? crypto.randomUUID(),
       userId: user.id,
       userEmail: user.email,
@@ -115,8 +115,8 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
 
   return {
     // What a client is shown: every visible tool, or in search mode only the two meta-tools.
-    listTools(user: GatewayUser): CatalogEntry[] {
-      const visible = catalog(user.role);
+    async listTools(user: GatewayUser): Promise<CatalogEntry[]> {
+      const visible = await catalog(user.role);
       return searchMode(visible) ? META_TOOLS : visible;
     },
 
@@ -126,10 +126,10 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
 
     // A call the user declined in the chat never reaches callTool, but it is still recorded (I2):
     // outcome "denied", with the reason, under the user who said no.
-    recordDeclined(user: GatewayUser, exposedName: string, args: Record<string, unknown> | undefined, ctx: CallContext, reason: string): void {
-      const entry = findTool(user, exposedName, args);
+    async recordDeclined(user: GatewayUser, exposedName: string, args: Record<string, unknown> | undefined, ctx: CallContext, reason: string): Promise<void> {
+      const entry = await findTool(user, exposedName, args);
       const real = exposedName === CALL_TOOL && entry ? entry : undefined;
-      writeAudit(db, {
+      await writeAudit(db, {
         requestId: ctx.requestId ?? crypto.randomUUID(),
         userId: user.id,
         userEmail: user.email,
@@ -149,7 +149,7 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
 
     async callTool(user: GatewayUser, exposedName: string, args: Record<string, unknown> | undefined, ctx: CallContext): Promise<CallToolResult> {
       if (exposedName === SEARCH_TOOL || exposedName === CALL_TOOL) {
-        const visible = catalog(user.role);
+        const visible = await catalog(user.role);
         // Outside search mode the meta-tools don't exist; fall through to "Unknown tool".
         if (searchMode(visible)) {
           if (exposedName === SEARCH_TOOL) return runSearch(user, visible, args, ctx);
@@ -170,9 +170,9 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
     let entry: CatalogEntry | undefined;
     try {
       // Resolve against all visible tools first, then apply policy, so the audit log can say "denied".
-      entry = catalog(null).find((e) => e.exposedName === exposedName);
+      entry = (await catalog(null)).find((e) => e.exposedName === exposedName);
       if (!entry) throw new UnknownToolError(exposedName);
-      if (!allows(user.role, loadPolicy(db).minRole(entry.serverId, entry.toolName, entry.annotations))) {
+      if (!allows(user.role, (await loadPolicy(db)).minRole(entry.serverId, entry.toolName, entry.annotations))) {
         outcome = "denied";
         throw new UnknownToolError(exposedName);
       }
@@ -184,16 +184,16 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
         return errorResult(`Gateway: ${error}`);
       }
 
-      const server = registry.get(entry.serverId)!;
+      const server = (await registry.get(entry.serverId))!;
       let result: CallToolResult;
       try {
-        result = await pool.callTool(targetFor(registry, server), entry.toolName, args ?? {}, server.timeout_ms);
+        result = await pool.callTool(await targetFor(registry, server), entry.toolName, args ?? {}, server.timeout_ms);
       } catch (err) {
         const e = err instanceof UpstreamError ? err : new UpstreamError("unreachable", `Upstream '${server.slug}' failed: ${(err as Error).message}`);
         outcome = e.kind;
         error = e.message;
         // Don't wait for the next health tick: hide this server's tools after the grace period now.
-        if (e.kind === "unreachable") health.markUnreachable(server.id, e.message);
+        if (e.kind === "unreachable") await health.markUnreachable(server.id, e.message);
         return errorResult(e.message);
       }
 
@@ -208,7 +208,7 @@ export function createGatewayCore(db: Db, registry: Registry, pool: UpstreamPool
       return result;
     } finally {
       // Exactly one audit row per call, whatever happened above (SYSTEM.md I2).
-      writeAudit(db, {
+      await writeAudit(db, {
         requestId: ctx.requestId ?? crypto.randomUUID(),
         userId: user.id,
         userEmail: user.email,

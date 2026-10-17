@@ -97,7 +97,7 @@ function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown): 
 }
 
 export function createRegistry(db: Db, encKey: Buffer, ssrf: SsrfPolicy, lookupAll?: Parameters<typeof checkUpstreamUrl>[2]) {
-  const getRow = (id: string) => db.prepare(`select * from mcp_servers where id = ?`).get(id) as ServerRow | undefined;
+  const getRow = (id: string) => db.get<ServerRow>(`select * from mcp_servers where id = ?`, id);
 
   async function checkedUrl(raw: string): Promise<string> {
     try {
@@ -108,42 +108,40 @@ export function createRegistry(db: Db, encKey: Buffer, ssrf: SsrfPolicy, lookupA
   }
 
   return {
-    list(): PublicServer[] {
-      return (db.prepare(`select * from mcp_servers order by slug`).all() as ServerRow[]).map(toPublic);
+    async list(): Promise<PublicServer[]> {
+      return (await db.all<ServerRow>(`select * from mcp_servers order by slug`)).map(toPublic);
     },
 
-    get(id: string): PublicServer | undefined {
-      const row = getRow(id);
+    async get(id: string): Promise<PublicServer | undefined> {
+      const row = await getRow(id);
       return row && toPublic(row);
     },
 
-    getBySlug(slug: string): PublicServer | undefined {
-      const row = db.prepare(`select * from mcp_servers where slug = ?`).get(slug) as ServerRow | undefined;
+    async getBySlug(slug: string): Promise<PublicServer | undefined> {
+      const row = await db.get<ServerRow>(`select * from mcp_servers where slug = ?`, slug);
       return row && toPublic(row);
     },
 
     async create(input: unknown, managedBy: ManagedBy = "admin", storeId: string | null = null): Promise<PublicServer> {
       const v = parse(createServerSchema, input);
       const url = await checkedUrl(v.url);
-      if (db.prepare(`select 1 from mcp_servers where slug = ?`).get(v.slug)) {
-        throw new RegistryError("conflict", `Gateway registry: slug '${v.slug}' is already used by another server`);
-      }
       const id = crypto.randomBytes(8).toString("hex");
-      db.prepare(
+      // The unique slug decides, also when two replicas create the same slug at the same moment.
+      const { changes } = await db.run(
         `insert into mcp_servers (id, slug, name, url, auth_type, auth_header_name, auth_secret_enc, enabled, timeout_ms, managed_by, store_id, status)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict (slug) do nothing`,
         id, v.slug, v.name, url, v.auth_type,
-        v.auth_type === "header" ? v.auth_header_name : null,
+        v.auth_type === "header" ? (v.auth_header_name ?? null) : null,
         v.auth_type === "none" || !v.credential ? null : seal(encKey, v.credential, id),
         v.enabled ? 1 : 0, v.timeout_ms, managedBy, storeId,
         v.enabled ? "Unknown" : "Disabled",
       );
-      return toPublic(getRow(id)!);
+      if (changes === 0) throw new RegistryError("conflict", `Gateway registry: slug '${v.slug}' is already used by another server`);
+      return toPublic((await getRow(id))!);
     },
 
     async update(id: string, input: unknown): Promise<PublicServer> {
-      const row = getRow(id);
+      const row = await getRow(id);
       if (!row) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
       if ("slug" in (input as object) && (input as { slug?: unknown }).slug !== row.slug) {
         throw new RegistryError("invalid", "Gateway registry: slug cannot change; it is part of every tool name clients already use");
@@ -158,12 +156,12 @@ export function createRegistry(db: Db, encKey: Buffer, ssrf: SsrfPolicy, lookupA
       if (authTypeNext === "header" && !headerNext) throw new RegistryError("invalid", "Gateway registry: auth_header_name: required for auth_type 'header'");
       const enabledNext = v.enabled ?? row.enabled === 1;
 
-      db.prepare(
+      const urlNext = v.url === undefined ? row.url : await checkedUrl(v.url);
+      await db.run(
         `update mcp_servers set name = ?, url = ?, auth_type = ?, auth_header_name = ?, auth_secret_enc = ?, enabled = ?,
-           timeout_ms = ?, status = ?, updated_at = datetime('now') where id = ?`,
-      ).run(
+           timeout_ms = ?, status = ?, updated_at = ${db.now} where id = ?`,
         v.name ?? row.name,
-        v.url === undefined ? row.url : await checkedUrl(v.url),
+        urlNext,
         authTypeNext, headerNext, secretNext,
         enabledNext ? 1 : 0,
         v.timeout_ms ?? row.timeout_ms,
@@ -171,50 +169,56 @@ export function createRegistry(db: Db, encKey: Buffer, ssrf: SsrfPolicy, lookupA
         enabledNext ? (row.enabled === 1 ? row.status : "Unknown") : "Disabled",
         id,
       );
-      return toPublic(getRow(id)!);
+      return toPublic((await getRow(id))!);
     },
 
     // Default per-tool rules declared where the server is registered (Helm seed, provisioner).
     // Only fills gaps: a rule an admin already set is never overwritten.
-    ensureToolPolicies(id: string, policies: Record<string, MinRole>): void {
-      const insert = db.prepare(`insert or ignore into tool_policies (server_id, tool_name, min_role) values (?, ?, ?)`);
-      for (const [tool, minRole] of Object.entries(policies)) insert.run(id, tool, minRole);
+    async ensureToolPolicies(id: string, policies: Record<string, MinRole>): Promise<void> {
+      for (const [tool, minRole] of Object.entries(policies)) {
+        await db.run(`insert into tool_policies (server_id, tool_name, min_role) values (?, ?, ?) on conflict do nothing`, id, tool, minRole);
+      }
     },
 
     // Admin reviewed the changed tool definitions of this server and accepts them (pinning, S6).
-    approveTools(id: string): number {
-      if (!getRow(id)) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
-      return db.prepare(`update mcp_tools set approved_hash = definition_hash where server_id = ? and approved_hash is not definition_hash`).run(id).changes;
+    async approveTools(id: string): Promise<number> {
+      if (!(await getRow(id))) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
+      const r = await db.run(
+        `update mcp_tools set approved_hash = definition_hash where server_id = ? and (approved_hash is null or approved_hash <> definition_hash)`,
+        id,
+      );
+      return r.changes;
     },
 
     // Admin choice for one tool ('*' = whole server); null removes it, back to the default rule.
-    setToolPolicy(id: string, toolName: string, minRole: MinRole | null): void {
-      if (!getRow(id)) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
+    async setToolPolicy(id: string, toolName: string, minRole: MinRole | null): Promise<void> {
+      if (!(await getRow(id))) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
       if (!/^(\*|[A-Za-z0-9_.:-]{1,128})$/.test(toolName)) throw new RegistryError("invalid", `Gateway registry: '${toolName}' is not a tool name`);
       if (minRole === null) {
-        db.prepare(`delete from tool_policies where server_id = ? and tool_name = ?`).run(id, toolName);
+        await db.run(`delete from tool_policies where server_id = ? and tool_name = ?`, id, toolName);
         return;
       }
       if (!MIN_ROLES.includes(minRole)) throw new RegistryError("invalid", `Gateway registry: min_role must be one of ${MIN_ROLES.join(", ")}`);
-      db.prepare(
+      await db.run(
         `insert into tool_policies (server_id, tool_name, min_role) values (?, ?, ?)
          on conflict (server_id, tool_name) do update set min_role = excluded.min_role`,
-      ).run(id, toolName, minRole);
+        id, toolName, minRole,
+      );
     },
 
-    delete(id: string): void {
-      const row = getRow(id);
+    async delete(id: string): Promise<void> {
+      const row = await getRow(id);
       if (!row) throw new RegistryError("not_found", `Gateway registry: server ${id} not found`);
       // Helm re-seeds its servers on every start, so deleting one would only bring it back; disable it instead.
       if (row.managed_by === "helm") {
         throw new RegistryError("forbidden", `Gateway registry: '${row.slug}' is managed by Helm; disable it instead of deleting`);
       }
-      db.prepare(`delete from mcp_servers where id = ?`).run(id);
+      await db.run(`delete from mcp_servers where id = ?`, id);
     },
 
     // Internal only: headers the gateway adds when calling this upstream. Never returned by an API.
-    authHeadersFor(id: string): Record<string, string> {
-      const row = getRow(id);
+    async authHeadersFor(id: string): Promise<Record<string, string>> {
+      const row = await getRow(id);
       if (!row || row.auth_type === "none" || !row.auth_secret_enc) return {};
       const secret = open(encKey, row.auth_secret_enc, row.id);
       return row.auth_type === "bearer" ? { Authorization: `Bearer ${secret}` } : { [row.auth_header_name!]: secret };

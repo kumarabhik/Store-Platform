@@ -13,8 +13,8 @@ import { listMembers, TeamError, updateMember } from "./members";
 
 export interface TeamRoutesDeps {
   db: Db;
-  currentUser: (req: FastifyRequest) => PublicUser | null;
-  createSession: (userId: string) => string;
+  currentUser: (req: FastifyRequest) => Promise<PublicUser | null>;
+  createSession: (userId: string) => Promise<string>;
   // Base URL of the dashboard, used to build invite links.
   dashboardUrl: string;
 }
@@ -27,8 +27,8 @@ export const AUDIT_CSV_MAX_ROWS = 10_000;
 export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
   const { db } = deps;
 
-  function caller(req: FastifyRequest, reply: FastifyReply, needAdmin: boolean): PublicUser | null {
-    const user = deps.currentUser(req);
+  async function caller(req: FastifyRequest, reply: FastifyReply, needAdmin: boolean): Promise<PublicUser | null> {
+    const user = await deps.currentUser(req);
     if (!user) {
       reply.code(401).send({ error: "unauthorized" });
       return null;
@@ -54,16 +54,16 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
 
   // ---- Members (admin) ----
   app.get("/api/members", async (req, reply) => {
-    if (!caller(req, reply, true)) return;
-    return { members: listMembers(db) };
+    if (!(await caller(req, reply, true))) return;
+    return { members: await listMembers(db) };
   });
 
   app.patch("/api/members/:id", async (req, reply) => {
-    if (!caller(req, reply, true)) return;
+    if (!(await caller(req, reply, true))) return;
     const v = body(z.object({ role: role.optional(), disabled: z.boolean().optional() }), req, reply);
     if (!v) return;
     try {
-      return { member: updateMember(db, (req.params as { id: string }).id, v) };
+      return { member: await updateMember(db, (req.params as { id: string }).id, v) };
     } catch (err) {
       return fail(reply, err);
     }
@@ -71,17 +71,17 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
 
   // ---- Invites (admin), accept (public, needs the token) ----
   app.get("/api/invites", async (req, reply) => {
-    if (!caller(req, reply, true)) return;
-    return { invites: listPendingInvites(db) };
+    if (!(await caller(req, reply, true))) return;
+    return { invites: await listPendingInvites(db) };
   });
 
   app.post("/api/invites", async (req, reply) => {
-    const admin = caller(req, reply, true);
+    const admin = await caller(req, reply, true);
     if (!admin) return;
     const v = body(z.object({ email: z.string().trim().email(), role: role.default("member") }), req, reply);
     if (!v) return;
     try {
-      const invite = createInvite(db, v, admin.id);
+      const invite = await createInvite(db, v, admin.id);
       // The link holds the only copy of the token; it is not stored and can't be shown again.
       const url = `${deps.dashboardUrl.replace(/\/$/, "")}/?invite=${invite.token}`;
       return reply.code(201).send({ invite: { id: invite.id, email: v.email.toLowerCase(), role: v.role, expires_at: invite.expires_at }, url });
@@ -91,9 +91,9 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
   });
 
   app.delete("/api/invites/:id", async (req, reply) => {
-    if (!caller(req, reply, true)) return;
+    if (!(await caller(req, reply, true))) return;
     try {
-      revokeInvite(db, (req.params as { id: string }).id);
+      await revokeInvite(db, (req.params as { id: string }).id);
       return { ok: true };
     } catch (err) {
       return fail(reply, err);
@@ -104,8 +104,8 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
     const v = body(z.object({ token: z.string().min(20).max(200), name: z.string().trim().min(2).max(80), password: z.string().min(8).max(128) }), req, reply);
     if (!v) return;
     try {
-      const user = acceptInvite(db, v);
-      return { token: deps.createSession(user.id), user };
+      const user = await acceptInvite(db, v);
+      return { token: await deps.createSession(user.id), user };
     } catch (err) {
       return fail(reply, err);
     }
@@ -126,8 +126,8 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
   });
 
   // Parses the filters and applies the caller's scope. Returns null after replying 401/403/400.
-  function auditQuery(req: FastifyRequest, reply: FastifyReply) {
-    const user = caller(req, reply, false);
+  async function auditQuery(req: FastifyRequest, reply: FastifyReply) {
+    const user = await caller(req, reply, false);
     if (!user) return null;
     const q = auditFilters.safeParse(req.query ?? {});
     if (!q.success) {
@@ -151,19 +151,19 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
   }
 
   app.get("/api/audit", async (req, reply) => {
-    const f = auditQuery(req, reply);
+    const f = await auditQuery(req, reply);
     if (!f) return;
-    const result = queryAudit(db, f);
+    const result = await queryAudit(db, f);
     return { rows: result.rows, next_before_id: result.nextBeforeId };
   });
 
   // CSV export for compliance reviews: the same filters and the same scoping as the page above,
   // newest first, capped so one request can't hold the API for long.
   app.get("/api/audit.csv", async (req, reply) => {
-    const f = auditQuery(req, reply);
+    const f = await auditQuery(req, reply);
     if (!f) return;
     // One extra row tells us whether the export was cut; paging (before_id) is ignored here.
-    const result = queryAudit(db, { ...f, beforeId: undefined, limit: AUDIT_CSV_MAX_ROWS + 1 });
+    const result = await queryAudit(db, { ...f, beforeId: undefined, limit: AUDIT_CSV_MAX_ROWS + 1 });
     const truncated = result.rows.length > AUDIT_CSV_MAX_ROWS;
     const rows = truncated ? result.rows.slice(0, AUDIT_CSV_MAX_ROWS) : result.rows;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
@@ -178,31 +178,31 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps) {
 
   // ---- API keys: own keys for everyone, all keys for admins ----
   app.get("/api/keys", async (req, reply) => {
-    const user = caller(req, reply, false);
+    const user = await caller(req, reply, false);
     if (!user) return;
     const all = (req.query as { all?: string }).all === "1" && user.role === "admin";
-    return { keys: listApiKeys(db, all ? null : user.id) };
+    return { keys: await listApiKeys(db, all ? null : user.id) };
   });
 
   app.post("/api/keys", async (req, reply) => {
-    const user = caller(req, reply, false);
+    const user = await caller(req, reply, false);
     if (!user) return;
     const v = body(z.object({ name: z.string().trim().min(1).max(60) }), req, reply);
     if (!v) return;
-    const created = createApiKey(db, user.id, v.name);
+    const created = await createApiKey(db, user.id, v.name);
     // The only time the full key is ever returned (SYSTEM.md I5).
     return reply.code(201).send({ key: created.key, id: created.id, prefix: created.prefix, name: v.name });
   });
 
   app.delete("/api/keys/:id", async (req, reply) => {
-    const user = caller(req, reply, false);
+    const user = await caller(req, reply, false);
     if (!user) return;
-    const key = getApiKey(db, (req.params as { id: string }).id);
+    const key = await getApiKey(db, (req.params as { id: string }).id);
     // A member asking about someone else's key gets the same 404 as for a key that doesn't exist.
     if (!key || (key.user_id !== user.id && user.role !== "admin")) {
       return reply.code(404).send({ error: "not_found", message: "Gateway: API key not found" });
     }
-    revokeApiKey(db, key.id, user.id);
-    return { ok: true, key: getApiKey(db, key.id) };
+    await revokeApiKey(db, key.id, user.id);
+    return { ok: true, key: await getApiKey(db, key.id) };
   });
 }

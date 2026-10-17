@@ -31,61 +31,74 @@ export function definitionHash(tool: { name: string; description?: string; input
     .digest("hex");
 }
 
-export function targetFor(registry: Registry, server: { id: string; slug: string; url: string; updated_at: string }): UpstreamTarget {
-  return { id: server.id, slug: server.slug, url: server.url, version: server.updated_at, headers: () => registry.authHeadersFor(server.id) };
+export async function targetFor(registry: Registry, server: { id: string; slug: string; url: string; updated_at: string }): Promise<UpstreamTarget> {
+  return { id: server.id, slug: server.slug, url: server.url, version: server.updated_at, headers: await registry.authHeadersFor(server.id) };
 }
 
 export function createHealthChecker(db: Db, registry: Registry, pool: UpstreamPool, opts: HealthOptions = DEFAULT_HEALTH) {
   const nextAt = new Map<string, number>();
   const running = new Set<string>();
+  // Last updated_at seen per server: an edit made on another API replica changes it, so this
+  // replica (the one probing) probes the server again right away (DESIGN §13.3).
+  const seenVersion = new Map<string, string>();
 
-  function markUnreachable(serverId: string, error: string) {
-    db.prepare(
-      `update mcp_servers set status = 'Unreachable', last_error = ?, last_check_at = datetime('now'),
+  async function markUnreachable(serverId: string, error: string) {
+    await db.run(
+      `update mcp_servers set status = 'Unreachable', last_error = ?, last_check_at = ${db.now},
          consecutive_failures = consecutive_failures + 1 where id = ? and enabled = 1`,
-    ).run(error, serverId);
-    const row = db.prepare(`select consecutive_failures from mcp_servers where id = ?`).get(serverId) as { consecutive_failures: number } | undefined;
+      error, serverId,
+    );
+    const row = await db.get<{ consecutive_failures: number }>(`select consecutive_failures from mcp_servers where id = ?`, serverId);
     nextAt.set(serverId, Date.now() + nextProbeDelay(row?.consecutive_failures ?? 1, opts));
   }
 
   async function probe(serverId: string): Promise<void> {
-    const server = registry.get(serverId);
+    const server = await registry.get(serverId);
     if (!server || !server.enabled) return;
     const started = Date.now();
     try {
-      const tools = await pool.listTools(targetFor(registry, server), opts.timeoutMs);
+      const tools = await pool.listTools(await targetFor(registry, server), opts.timeoutMs);
       const latency = Date.now() - started;
-      db.transaction(() => {
-        db.prepare(
-          `update mcp_servers set status = 'Connected', last_error = null, last_ok_at = datetime('now'), last_check_at = datetime('now'),
+      await db.tx(async (db) => {
+        await db.run(
+          `update mcp_servers set status = 'Connected', last_error = null, last_ok_at = ${db.now}, last_check_at = ${db.now},
              last_latency_ms = ?, consecutive_failures = 0 where id = ?`,
-        ).run(latency, serverId);
+          latency, serverId,
+        );
         // Replace the cached catalog. Pinning (S6, DESIGN §8.6): a tool's first definition is
         // approved on sight (trust on first use); later changes keep the old approved_hash, so the
         // catalog hides the tool until an admin approves the new definition.
-        const upsert = db.prepare(
-          `insert into mcp_tools (server_id, name, description, input_schema, annotations, definition_hash, approved_hash, seen_at)
-           values (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-           on conflict (server_id, name) do update set description = excluded.description, input_schema = excluded.input_schema,
-             annotations = excluded.annotations, definition_hash = excluded.definition_hash, seen_at = excluded.seen_at,
-             approved_hash = coalesce(mcp_tools.approved_hash, excluded.definition_hash)`,
-        );
         for (const t of tools) {
           const hash = definitionHash(t);
-          upsert.run(serverId, t.name, t.description ?? null, JSON.stringify(t.inputSchema), t.annotations ? JSON.stringify(t.annotations) : null, hash, hash);
+          await db.run(
+            `insert into mcp_tools (server_id, name, description, input_schema, annotations, definition_hash, approved_hash, seen_at)
+             values (?, ?, ?, ?, ?, ?, ?, ${db.now})
+             on conflict (server_id, name) do update set description = excluded.description, input_schema = excluded.input_schema,
+               annotations = excluded.annotations, definition_hash = excluded.definition_hash, seen_at = excluded.seen_at,
+               approved_hash = coalesce(mcp_tools.approved_hash, excluded.definition_hash)`,
+            serverId, t.name, t.description ?? null, JSON.stringify(t.inputSchema), t.annotations ? JSON.stringify(t.annotations) : null, hash, hash,
+          );
         }
+        // Tools the server no longer lists leave the cache.
         const names = tools.map((t) => t.name);
-        db.prepare(`delete from mcp_tools where server_id = ? and name not in (select value from json_each(?))`).run(serverId, JSON.stringify(names));
-      })();
+        await db.run(
+          `delete from mcp_tools where server_id = ?${names.length ? ` and name not in (${names.map(() => "?").join(", ")})` : ""}`,
+          serverId, ...names,
+        );
+      });
       nextAt.set(serverId, Date.now() + nextProbeDelay(0, opts));
     } catch (err) {
-      markUnreachable(serverId, (err as Error).message);
+      await markUnreachable(serverId, (err as Error).message);
     }
   }
 
   // Runs every server whose next probe is due. Disabled servers are skipped and shown as Disabled.
   async function runDue(now: number = Date.now()): Promise<void> {
-    const rows = db.prepare(`select id, enabled from mcp_servers`).all() as { id: string; enabled: number }[];
+    const rows = await db.all<{ id: string; enabled: number; updated_at: string }>(`select id, enabled, updated_at from mcp_servers`);
+    for (const r of rows) {
+      if (seenVersion.get(r.id) !== r.updated_at) nextAt.set(r.id, 0);
+      seenVersion.set(r.id, r.updated_at);
+    }
     const due = rows.filter((r) => r.enabled === 1 && (nextAt.get(r.id) ?? 0) <= now && !running.has(r.id));
     await Promise.all(
       due.map(async (r) => {

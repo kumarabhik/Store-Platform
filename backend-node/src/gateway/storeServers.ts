@@ -41,7 +41,7 @@ export async function registerStoreServer(deps: StoreServerDeps, store: Provisio
   const credential = await deps.readSecret(store.namespace, `${store.release}-credentials`, "mcp-token");
   const fields = { name: `Store: ${store.name}`.slice(0, 80), url: storeServerUrl(store), auth_type: "bearer" as const, credential };
 
-  const existing = deps.registry.getBySlug(slug);
+  const existing = await deps.registry.getBySlug(slug);
   if (existing) {
     if (existing.store_id !== store.id) {
       throw new Error(`Gateway: slug '${slug}' is already used by a server that doesn't belong to store ${store.id}`);
@@ -52,17 +52,17 @@ export async function registerStoreServer(deps: StoreServerDeps, store: Provisio
     return existing.id;
   }
   const created = await deps.registry.create({ slug, ...fields }, "provisioner", store.id);
-  deps.registry.ensureToolPolicies(created.id, STORE_TOOL_POLICIES);
+  await deps.registry.ensureToolPolicies(created.id, STORE_TOOL_POLICIES);
   deps.health.reschedule(created.id);
   return created.id;
 }
 
 // Removes every gateway server that belongs to the store. Called before teardown starts, so
 // clients lose the tools at once instead of seeing them fail while the pods go away.
-export function removeStoreServers(deps: Pick<StoreServerDeps, "db" | "registry" | "pool">, storeId: string): number {
-  const rows = deps.db.prepare(`select id from mcp_servers where store_id = ?`).all(storeId) as { id: string }[];
+export async function removeStoreServers(deps: Pick<StoreServerDeps, "db" | "registry" | "pool">, storeId: string): Promise<number> {
+  const rows = await deps.db.all<{ id: string }>(`select id from mcp_servers where store_id = ?`, storeId);
   for (const { id } of rows) {
-    deps.registry.delete(id);
+    await deps.registry.delete(id);
     deps.pool.drop(id);
   }
   return rows.length;

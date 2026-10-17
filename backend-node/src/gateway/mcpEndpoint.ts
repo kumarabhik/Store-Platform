@@ -15,7 +15,7 @@ export interface McpEndpointDeps {
   db: Db;
   core: GatewayCore;
   // Role of the key's owner, read from users.role on every request (a demotion applies at once).
-  roleOf: (user: { id: string; email: string }) => Role;
+  roleOf: (user: { id: string; email: string }) => Promise<Role>;
   // Browser origins allowed to call /mcp. CLI clients send no Origin header and are unaffected.
   allowedOrigins: string[];
   // Per-API-key limiter (DESIGN §9.4): one runaway agent loop can't exhaust the gateway for the team.
@@ -35,7 +35,7 @@ export function registerMcpEndpoint(app: FastifyInstance, deps: McpEndpointDeps)
     }
 
     const auth = req.headers.authorization ?? "";
-    const owner = auth.startsWith("Bearer ") ? verifyApiKey(deps.db, auth.slice(7).trim()) : null;
+    const owner = auth.startsWith("Bearer ") ? await verifyApiKey(deps.db, auth.slice(7).trim()) : null;
     if (!owner) {
       return reply
         .code(401)
@@ -50,11 +50,11 @@ export function registerMcpEndpoint(app: FastifyInstance, deps: McpEndpointDeps)
         .header("Retry-After", String(decision.retryAfterSec))
         .send(rpcError(-32000, `Gateway: rate limit for this API key exceeded (${decision.limit} requests); retry in ${decision.retryAfterSec} s`));
     }
-    const user: GatewayUser ={ id: owner.userId, email: owner.email, role: deps.roleOf({ id: owner.userId, email: owner.email }) };
+    const user: GatewayUser = { id: owner.userId, email: owner.email, role: await deps.roleOf({ id: owner.userId, email: owner.email }) };
 
     const server = new Server({ name: "mcp-gateway", version: "0.1.0" }, { capabilities: { tools: { listChanged: false } } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: deps.core.listTools(user).map(
+      tools: (await deps.core.listTools(user)).map(
         (e): Tool => ({ name: e.exposedName, description: e.description, inputSchema: e.inputSchema as Tool["inputSchema"], annotations: e.annotations }),
       ),
     }));

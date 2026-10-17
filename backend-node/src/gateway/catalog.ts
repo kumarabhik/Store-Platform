@@ -68,17 +68,15 @@ interface ToolRow {
 // Every tool this role may see, sorted by exposed name (stable order helps clients' prompt caching).
 // role = null skips the policy filter; callTool uses that to tell "denied" from "not found" in the audit log.
 // pin: hide tools whose definition changed since an admin (or first sight) approved it (S6).
-export function buildCatalog(db: Db, role: Role | null, opts: { pin?: boolean; now?: number } = {}): CatalogEntry[] {
+export async function buildCatalog(db: Db, role: Role | null, opts: { pin?: boolean; now?: number } = {}): Promise<CatalogEntry[]> {
   const { pin = true, now = Date.now() } = opts;
-  const policy = loadPolicy(db);
-  const rows = db
-    .prepare(
-      `select t.server_id, t.name, t.description, t.input_schema, t.annotations, t.definition_hash, t.approved_hash,
-              s.slug, s.name as server_name, s.status, s.last_ok_at
-       from mcp_tools t join mcp_servers s on s.id = t.server_id
-       where s.enabled = 1`,
-    )
-    .all() as ToolRow[];
+  const policy = await loadPolicy(db);
+  const rows = await db.all<ToolRow>(
+    `select t.server_id, t.name, t.description, t.input_schema, t.annotations, t.definition_hash, t.approved_hash,
+            s.slug, s.name as server_name, s.status, s.last_ok_at
+     from mcp_tools t join mcp_servers s on s.id = t.server_id
+     where s.enabled = 1`,
+  );
 
   return rows
     .filter((r) => r.status === "Connected" || now - (parseDbTime(r.last_ok_at) ?? 0) < STALE_GRACE_MS)

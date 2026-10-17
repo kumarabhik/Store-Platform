@@ -111,6 +111,25 @@ api:
     size: 1Gi
     storageClassName: ""
 
+# The platform database (DESIGN §13.3). Off: SQLite on the API's volume, which allows one replica.
+# On: a Postgres StatefulSet; the API keeps nothing on disk and can run several replicas.
+postgres:
+  enabled: false
+  image: postgres:17.10-alpine
+  database: platform
+  user: platform
+  # Existing Secret with key "password" (letters and digits). Empty: generated once and kept.
+  existingSecret: ""
+  storage:
+    size: 2Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  # Moving an existing install: copy the SQLite database on api.persistence into the empty Postgres
+  # once (src/importSqlite.ts). The SQLite volume is kept either way, for `helm rollback`.
+  importSqlite: true
+
 # Nightly backup of the platform database to the backup store (charts/backups, DESIGN §13.6).
 # Needs Secret `s3SecretName` in this namespace; ops/up.ps1 and deploy.sh copy it from the store.
 backup:

@@ -1,8 +1,9 @@
+import os from "node:os";
 import * as dns from "node:dns/promises";
 import type { Db } from "./db";
 import { addEvent } from "./db";
 import type { KubeClients } from "./kube";
-import { ensureLeaseColumnsSafe, claimOneStore, releaseLease } from "./lease";
+import { claimOneStore, releaseLease } from "./lease";
 import {
   ensureNamespace,
   ensureNamespaceHelmAccess,
@@ -20,7 +21,7 @@ import {
 } from "./kube";
 import { buildEngineValues, CHART_DIR } from "./engine";
 import { waitForNamespaceGone } from "./namespace";
-import { ensureLeaderTable, tryAcquireLeader } from "./leader";
+import { tryAcquireLeader } from "./leader";
 
 async function waitForHttp(url: string, timeoutMs: number): Promise<boolean> {
   const start = Date.now();
@@ -51,10 +52,8 @@ async function namespaceExists(kube: KubeClients, ns: string): Promise<boolean> 
   }
 }
 
-function getRetryCount(db: Db, storeId: string): number {
-  const row = db
-    .prepare(`select count(*) as c from store_events where store_id=? and type='retry_scheduled'`)
-    .get(storeId) as { c: number } | undefined;
+async function getRetryCount(db: Db, storeId: string): Promise<number> {
+  const row = await db.get<{ c: number }>(`select count(*) as c from store_events where store_id=? and type='retry_scheduled'`, storeId);
   return row?.c ?? 0;
 }
 
@@ -124,9 +123,8 @@ async function resolveDomainStatus(domain: string, targetHost: string) {
 export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: StoreHooks): () => void {
   const tickMs = 2000;
   const helmInstallTimeoutMs = 20 * 60 * 1000;
-  ensureLeaseColumnsSafe(db);
-  const owner = `reconciler-${process.pid}`;
-  ensureLeaderTable(db);
+  // Unique per pod: in a container every replica is PID 1, so the PID alone would be shared.
+  const owner = `reconciler-${os.hostname()}-${process.pid}`;
   let running = false;
   const platformStoreUrlFor = (host: string, includePort = true) =>
     `${cfg.storePublicScheme?.trim() || "http"}://${host}${includePort && cfg.storePublicPort?.trim() ? `:${cfg.storePublicPort.trim()}` : ""}`;
@@ -135,10 +133,10 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
     if (running) return;
     running = true;
     try {
-      const leader = tryAcquireLeader(db, "reconciler", 15);
+      const leader = await tryAcquireLeader(db, "reconciler", 15);
       if (!leader) return;
 
-      const del = claimOneStore(db, "Deleting", owner, 60) as any;
+      const del = (await claimOneStore(db, "Deleting", owner, 60)) as any;
 
       if (del) {
         const storeId = del.id as string;
@@ -151,48 +149,46 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
           await cfg.backup?.revoke(storeId);
           const exists = await namespaceExists(kube, ns);
           if (!exists) {
-            addEvent(db, storeId, "delete_skip_missing_namespace", ns);
-            db.prepare(`delete from stores where id=?`).run(storeId);
+            await addEvent(db, storeId, "delete_skip_missing_namespace", ns);
+            await db.run(`delete from stores where id=?`, storeId);
             return;
           }
 
-          addEvent(db, storeId, "delete_reconcile_start", `ns=${ns}`);
+          await addEvent(db, storeId, "delete_reconcile_start", `ns=${ns}`);
           await ensureNamespaceHelmAccess(kube.rbac, ns, cfg.installerRole);
 
           const release = `wc-${storeId}`;
           const jobName = `helm-uninstall-${storeId}`;
 
-          addEvent(db, storeId, "helm_uninstall_job_create", `release=${release}`);
+          await addEvent(db, storeId, "helm_uninstall_job_create", `release=${release}`);
 
           await applyHelmUninstallJob(kube.batch, ns, jobName, { image: cfg.chartImage, release });
 
           const res = await waitForJob(kube.batch, ns, jobName, 10 * 60 * 1000);
           if (!res.ok) throw new Error(res.reason);
 
-          addEvent(db, storeId, "helm_uninstalled");
+          await addEvent(db, storeId, "helm_uninstalled");
 
-          addEvent(db, storeId, "namespace_delete", ns);
+          await addEvent(db, storeId, "namespace_delete", ns);
           await deleteNamespace(kube.core, ns);
 
           const gone = await waitForNamespaceGone(kube.core, ns, 2 * 60 * 1000);
           if (!gone) throw new Error("namespace deletion timeout");
 
-          db.prepare(`delete from stores where id=?`).run(storeId);
+          await db.run(`delete from stores where id=?`, storeId);
         } catch (e: any) {
           const msg = String(e?.message ?? e);
-          db.prepare(
-            `update stores
-             set last_error=?, updated_at=datetime('now')
-             where id=?`
-          ).run(msg, storeId);
-          addEvent(db, storeId, "delete_failed", msg);
-          releaseLease(db, storeId);
+          await db.run(`update stores
+             set last_error=?, updated_at=${db.now}
+             where id=?`, msg, storeId);
+          await addEvent(db, storeId, "delete_failed", msg);
+          await releaseLease(db, storeId);
         }
 
         return;
       }
 
-      const row = claimOneStore(db, "Provisioning", owner, 60) as any;
+      const row = (await claimOneStore(db, "Provisioning", owner, 60)) as any;
       if (!row) return;
 
       const storeId = row.id as string;
@@ -204,7 +200,7 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
         const host = customDomain || defaultHost;
         const url = customDomain ? platformStoreUrlFor(host, false) : platformStoreUrlFor(host, true);
 
-        addEvent(db, storeId, "reconcile_start", `ns=${ns} host=${host}`);
+        await addEvent(db, storeId, "reconcile_start", `ns=${ns} host=${host}`);
 
         await ensureNamespace(kube.core, ns);
         await ensureNamespaceHelmAccess(kube.rbac, ns, cfg.installerRole);
@@ -212,7 +208,7 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
         await applyLimitRange(kube.core, ns);
         await applyNetworkPolicy(kube.net, ns, cfg.apiServer);
 
-        addEvent(db, storeId, "guardrails_applied");
+        await addEvent(db, storeId, "guardrails_applied");
 
         const release = `wc-${storeId}`;
         const jobName = `helm-install-${storeId}`;
@@ -220,7 +216,7 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
         const access = cfg.backup ? await cfg.backup.ensure(storeId) : null;
         if (access) await writeBackupSecret(kube.core, ns, access);
         const backup = !!access;
-        addEvent(db, storeId, backup ? "backup_enabled" : "backup_skipped", backup ? `nightly, to bucket ${access!.bucket} with the store's own key` : "no backup store installed");
+        await addEvent(db, storeId, backup ? "backup_enabled" : "backup_skipped", backup ? `nightly, to bucket ${access!.bucket} with the store's own key` : "no backup store installed");
 
         const engine = row.engine as "woocommerce" | "medusa";
         const built = buildEngineValues({
@@ -252,12 +248,12 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
           envValues: cfg.chartEnv,
           valuesYaml: built.valuesYaml,
         });
-        addEvent(db, storeId, job === "attached" ? "helm_job_attached" : "helm_job_create", `release=${release}`);
+        await addEvent(db, storeId, job === "attached" ? "helm_job_attached" : "helm_job_create", `release=${release}`);
 
         const res = await waitForJob(kube.batch, ns, jobName, helmInstallTimeoutMs);
         if (!res.ok) throw new Error(res.reason);
 
-        addEvent(db, storeId, "helm_installed");
+        await addEvent(db, storeId, "helm_installed");
 
         const ok = await waitForAnyDeploymentAvailable(
           kube.apps,
@@ -280,36 +276,32 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
           } catch (err: any) {
             throw new Error(`mcp registration failed: ${String(err?.message ?? err)}`);
           }
-          addEvent(db, storeId, "mcp_registered", `store_${storeId}`);
+          await addEvent(db, storeId, "mcp_registered", `store_${storeId}`);
         }
 
-        db.prepare(
-          `update stores
-           set status='Ready', url=?, domain_status=?, domain_last_error=null, updated_at=datetime('now'), last_error=null
-           where id=?`
-        ).run(url, domainStatus, storeId);
+        await db.run(`update stores
+           set status='Ready', url=?, domain_status=?, domain_last_error=null, updated_at=${db.now}, last_error=null
+           where id=?`, url, domainStatus, storeId);
 
-        addEvent(db, storeId, "ready", url);
-        releaseLease(db, storeId);
+        await addEvent(db, storeId, "ready", url);
+        await releaseLease(db, storeId);
       } catch (e: any) {
         const msg = String(e?.message ?? e);
 
-        const retryCount = getRetryCount(db, storeId);
+        const retryCount = await getRetryCount(db, storeId);
         const maxRetries = 5;
 
         if (isRetryableProvisioningError(msg) && retryCount < maxRetries) {
           const delaySeconds = Math.min(30 * Math.pow(2, retryCount), 300);
-          db.prepare(
-            `update stores
+          await db.run(`update stores
              set status='Provisioning',
                  last_error=?,
                  lease_owner=null,
-                 lease_until=datetime('now', '+' || ? || ' seconds'),
-                 updated_at=datetime('now')
-             where id=?`
-          ).run(msg, delaySeconds, storeId);
+                 lease_until=${db.inSeconds},
+                 updated_at=${db.now}
+             where id=?`, msg, delaySeconds, storeId);
 
-          addEvent(
+          await addEvent(
             db,
             storeId,
             "retry_scheduled",
@@ -318,18 +310,20 @@ export function startReconciler(db: Db, kube: KubeClients, cfg: Config, hooks?: 
           return;
         }
 
-        db.prepare(
-          `update stores
+        await db.run(`update stores
            set status='Failed',
                last_error=?,
                domain_last_error=case when custom_domain is not null and trim(custom_domain) <> '' then ? else domain_last_error end,
-               updated_at=datetime('now')
-           where id=?`
-        ).run(msg, msg, storeId);
+               updated_at=${db.now}
+           where id=?`, msg, msg, storeId);
 
-        addEvent(db, storeId, "failed", msg);
-        releaseLease(db, storeId);
+        await addEvent(db, storeId, "failed", msg);
+        await releaseLease(db, storeId);
       }
+    } catch (err) {
+      // A database blip (Postgres restarting, a connection timeout under load) must not end the
+      // process through an unhandled rejection; the next tick retries (SYSTEM.md L56).
+      console.error(`Reconciler: tick failed, retrying in ${tickMs} ms: ${(err as Error).message}`);
     } finally {
       running = false;
     }

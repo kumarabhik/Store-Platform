@@ -61,7 +61,7 @@ export interface AuditRow {
 }
 
 // Newest first, paged by id ("before_id") so new rows arriving during auto-refresh don't shift pages.
-export function queryAudit(db: Db, f: AuditFilter): { rows: AuditRow[]; nextBeforeId: number | null } {
+export async function queryAudit(db: Db, f: AuditFilter): Promise<{ rows: AuditRow[]; nextBeforeId: number | null }> {
   const where: string[] = [];
   const args: (string | number)[] = [];
   const add = (sql: string, v: string | number | undefined) => {
@@ -72,18 +72,18 @@ export function queryAudit(db: Db, f: AuditFilter): { rows: AuditRow[]; nextBefo
   add("user_id = ?", f.userId);
   add("user_email = ?", f.userEmail?.toLowerCase());
   add("server_slug = ?", f.server);
-  add("instr(exposed_name, ?) > 0", f.tool);
+  // Substring match without LIKE, so `_` and `%` in the filter are plain characters.
+  add(`${db.dialect === "postgres" ? "strpos" : "instr"}(exposed_name, ?) > 0`, f.tool);
   add("outcome = ?", f.outcome);
   add("source = ?", f.source);
   add("ts >= ?", f.from);
   add("ts < ?", f.to);
   add("id < ?", f.beforeId);
-  const rows = db
-    .prepare(
-      `select id, ts, user_id, user_email, api_key_id, source, server_slug, tool_name, exposed_name, duration_ms, outcome, error, args_preview
-       from audit_log ${where.length ? `where ${where.join(" and ")}` : ""} order by id desc limit ?`,
-    )
-    .all(...args, f.limit) as AuditRow[];
+  const rows = await db.all<AuditRow>(
+    `select id, ts, user_id, user_email, api_key_id, source, server_slug, tool_name, exposed_name, duration_ms, outcome, error, args_preview
+     from audit_log ${where.length ? `where ${where.join(" and ")}` : ""} order by id desc limit ?`,
+    ...args, f.limit,
+  );
   return { rows, nextBeforeId: rows.length === f.limit ? rows[rows.length - 1].id : null };
 }
 
@@ -108,12 +108,11 @@ export function auditCsv(rows: AuditRow[]): string {
   return `${lines.join("\r\n")}\r\n`;
 }
 
-export function writeAudit(db: Db, e: AuditEntry): void {
-  db.prepare(
+export async function writeAudit(db: Db, e: AuditEntry): Promise<void> {
+  await db.run(
     `insert into audit_log (request_id, user_id, user_email, api_key_id, source, server_id, server_slug,
        tool_name, exposed_name, duration_ms, outcome, error, args_preview)
      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
     e.requestId, e.userId, e.userEmail, e.apiKeyId, e.source, e.serverId, e.serverSlug,
     e.toolName, e.exposedName, Math.round(e.durationMs), e.outcome,
     e.error ? e.error.slice(0, ERROR_MAX) : null,

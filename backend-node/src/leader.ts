@@ -1,29 +1,19 @@
 import type { Db } from "./db";
 import os from "node:os";
 
-export function ensureLeaderTable(db: Db) {
-  db.exec(`
-    create table if not exists leader_lock (
-      name text primary key,
-      owner text not null,
-      lease_until text not null
-    );
-  `);
-}
-
-export function tryAcquireLeader(db: Db , name: string, leaseSeconds: number) {
+// One leader per lock name across all API replicas (DESIGN §13.3). The insert-or-take-over is one
+// statement, so two replicas can't both win: the database decides, with its own clock.
+export async function tryAcquireLeader(db: Db, name: string, leaseSeconds: number): Promise<boolean> {
   const owner = `${os.hostname()}-${process.pid}`;
-  const untilExpr = `datetime('now', '+${leaseSeconds} seconds')`;
-
-  db.prepare(`
-    insert into leader_lock(name, owner, lease_until)
-    values(?, ?, ${untilExpr})
-    on conflict(name) do update set
-      owner=excluded.owner,
-      lease_until=${untilExpr}
-    where leader_lock.lease_until < datetime('now') or leader_lock.owner = excluded.owner
-  `).run(name, owner);
-
-  const row = db.prepare(`select owner, lease_until from leader_lock where name=?`).get(name) as any;
+  await db.run(
+    `insert into leader_lock(name, owner, lease_until)
+     values(?, ?, ${db.inSeconds})
+     on conflict(name) do update set
+       owner = excluded.owner,
+       lease_until = excluded.lease_until
+     where leader_lock.lease_until < ${db.now} or leader_lock.owner = excluded.owner`,
+    name, owner, leaseSeconds,
+  );
+  const row = await db.get<{ owner: string }>(`select owner from leader_lock where name = ?`, name);
   return row?.owner === owner;
 }

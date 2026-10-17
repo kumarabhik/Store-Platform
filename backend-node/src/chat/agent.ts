@@ -63,8 +63,8 @@ export function sanitizeHistory(history: HistoryMessage[]): ChatMessage[] {
     .map((m) => ({ role: m.role, content: m.content.slice(0, 8_000) }));
 }
 
-function toolSpecs(core: ChatDeps["core"], user: GatewayUser): ToolSpec[] {
-  return core.listTools(user).map((t) => {
+async function toolSpecs(core: ChatDeps["core"], user: GatewayUser): Promise<ToolSpec[]> {
+  return (await core.listTools(user)).map((t) => {
     // Some providers reject "$schema" inside function parameters; it carries no meaning here.
     const { $schema: _ignored, ...parameters } = t.inputSchema as Record<string, unknown>;
     return { type: "function", function: { name: t.exposedName, description: t.description, parameters } };
@@ -106,13 +106,14 @@ export async function runChat(
   const budget = AbortSignal.timeout(BUDGET_MS);
   const stop = signal ? AbortSignal.any([signal, budget]) : budget;
   const messages: ChatMessage[] = [{ role: "system", content: systemPrompt(user, deps.timezone, now()) }, ...sanitizeHistory(history)];
-  const tools = toolSpecs(deps.core, user);
+  const tools = await toolSpecs(deps.core, user);
 
   // Shows the user what the model wants to run and waits for Approve/Decline (P10).
   async function askUser(tc: ToolCall, args: Record<string, unknown>, reason: string) {
     const id = crypto.randomUUID();
+    await deps.approvals!.store.open(id, user.id);
     emit({ type: "approval_required", id, call_id: tc.id, name: tc.function.name, args, reason, timeout_ms: APPROVAL_TIMEOUT_MS });
-    const outcome = await deps.approvals!.store.wait(id, user.id, stop);
+    const outcome = await deps.approvals!.store.wait(id, stop);
     emit({ type: "approval_result", id, call_id: tc.id, outcome });
     return outcome;
   }
@@ -137,13 +138,13 @@ export async function runChat(
           const args = tc.function.arguments ? (JSON.parse(tc.function.arguments) as Record<string, unknown>) : {};
           emit({ type: "tool_call", id: tc.id, name: tc.function.name, args });
           announced = true;
-          const reason = deps.approvals ? approvalReason(deps.core.findTool(user, tc.function.name, args), deps.approvals.mode) : null;
+          const reason = deps.approvals ? approvalReason(await deps.core.findTool(user, tc.function.name, args), deps.approvals.mode) : null;
           const outcome = reason ? await askUser(tc, args, reason) : "approved";
           if (outcome === "approved") {
             result = await deps.core.callTool(user, tc.function.name, args, { source: "chat" });
           } else {
             const why = outcome === "timeout" ? "no answer from the user within the approval time" : "declined by the user in the chat";
-            deps.core.recordDeclined(user, tc.function.name, args, { source: "chat" }, why);
+            await deps.core.recordDeclined(user, tc.function.name, args, { source: "chat" }, why);
             result = { isError: true, content: [{ type: "text", text: `Not done: ${why}. Don't retry this unless the user asks again.` }] };
           }
         } catch (err) {

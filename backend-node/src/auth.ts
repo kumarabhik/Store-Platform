@@ -37,7 +37,7 @@ export function verifyPassword(password: string, storedHash: string) {
   return timingSafeEqualsHex(actual, expected);
 }
 
-export function createUser(db: Db, input: { name: string; email: string; password: string }, role: Role = "member"): PublicUser {
+export async function createUser(db: Db, input: { name: string; email: string; password: string }, role: Role = "member"): Promise<PublicUser> {
   const id = crypto.randomBytes(8).toString("hex");
   const email = normalizeEmail(input.email);
   const user = {
@@ -47,29 +47,24 @@ export function createUser(db: Db, input: { name: string; email: string; passwor
     role,
   };
 
-  db.prepare(
+  await db.run(
     `insert into users(id, name, email, password_hash, role, created_at, updated_at)
-     values (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
-  ).run(user.id, user.name, user.email, hashPassword(input.password), role);
+     values (?, ?, ?, ?, ?, ${db.now}, ${db.now})`,
+    user.id, user.name, user.email, hashPassword(input.password), role,
+  );
 
   return user;
 }
 
 export function findUserByEmail(db: Db, email: string) {
-  return (
-    db
-      .prepare(`select id, name, email, role, password_hash, disabled_at from users where email=? limit 1`)
-      .get(normalizeEmail(email)) as
-      | (PublicUser & {
-          password_hash: string;
-          disabled_at: string | null;
-        })
-      | undefined
+  return db.get<PublicUser & { password_hash: string; disabled_at: string | null }>(
+    `select id, name, email, role, password_hash, disabled_at from users where email=? limit 1`,
+    normalizeEmail(email),
   );
 }
 
-export function authenticateUser(db: Db, email: string, password: string): PublicUser | null {
-  const row = findUserByEmail(db, email);
+export async function authenticateUser(db: Db, email: string, password: string): Promise<PublicUser | null> {
+  const row = await findUserByEmail(db, email);
   if (!row) return null;
   if (!verifyPassword(password, row.password_hash)) return null;
   // A disabled user can't log in; same answer as a wrong password, so it reveals nothing.
@@ -77,37 +72,36 @@ export function authenticateUser(db: Db, email: string, password: string): Publi
   return { id: row.id, name: row.name, email: row.email, role: row.role };
 }
 
-export function createSession(db: Db, userId: string) {
+export async function createSession(db: Db, userId: string) {
   const token = crypto.randomBytes(32).toString("base64url");
-  db.prepare(
-    `insert into user_sessions(token, user_id, created_at, expires_at)
-     values (?, ?, datetime('now'), datetime('now', '+' || ? || ' days'))`
-  ).run(token, userId, SESSION_TTL_DAYS);
+  await db.run(
+    `insert into user_sessions(token, user_id, created_at, expires_at) values (?, ?, ${db.now}, ${db.inSeconds})`,
+    token, userId, SESSION_TTL_DAYS * 86_400,
+  );
   return token;
 }
 
-export function getUserBySessionToken(db: Db, token: string | null | undefined): PublicUser | null {
+export async function getUserBySessionToken(db: Db, token: string | null | undefined): Promise<PublicUser | null> {
   if (!token) return null;
 
-  const row = db
-    .prepare(
-      `select u.id, u.name, u.email, u.role
-       from user_sessions s
-       join users u on u.id = s.user_id
-       where s.token=?
-         and s.expires_at > datetime('now')
-         and u.disabled_at is null
-       limit 1`
-    )
-    .get(token) as PublicUser | undefined;
+  const row = await db.get<PublicUser>(
+    `select u.id, u.name, u.email, u.role
+     from user_sessions s
+     join users u on u.id = s.user_id
+     where s.token=?
+       and s.expires_at > ${db.now}
+       and u.disabled_at is null
+     limit 1`,
+    token,
+  );
 
   if (row) return row;
 
-  db.prepare(`delete from user_sessions where token=? and expires_at <= datetime('now')`).run(token);
+  await db.run(`delete from user_sessions where token=? and expires_at <= ${db.now}`, token);
   return null;
 }
 
-export function deleteSession(db: Db, token: string | null | undefined) {
+export async function deleteSession(db: Db, token: string | null | undefined) {
   if (!token) return;
-  db.prepare(`delete from user_sessions where token=?`).run(token);
+  await db.run(`delete from user_sessions where token=?`, token);
 }

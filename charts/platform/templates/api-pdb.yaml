@@ -1,0 +1,12 @@
+{{- if gt (int .Values.api.replicas) 1 }}
+# Node drains and cluster upgrades evict at most one API pod at a time (DESIGN §13.3).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "platform.apiName" . }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: {{ include "platform.apiName" . }}
+{{- end }}

@@ -99,7 +99,41 @@ spec:
               {{- toYaml $np.privateCidrs | nindent 14 }}
       ports:
         - { port: 443, protocol: TCP }
+    {{- if .Values.postgres.enabled }}
+    # The platform database.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "platform.postgresName" . }}
+      ports:
+        - { port: 5432, protocol: TCP }
+    {{- end }}
 ---
+{{- if .Values.postgres.enabled }}
+# Postgres: only platform-api (and its import init container) and the nightly backup connect.
+# It makes no connections of its own.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "platform.postgresName" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "platform.postgresName" . }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: {{ include "platform.apiName" . }}
+        - podSelector:
+            matchLabels:
+              app: {{ include "platform.apiName" . }}-backup
+      ports:
+        - { port: 5432, protocol: TCP }
+  egress: []
+---
+{{- end }}
 # Dashboard (static files + /api proxy): reached only through the ingress controller, and it
 # only talks to platform-api.
 apiVersion: networking.k8s.io/v1
@@ -147,5 +181,14 @@ spec:
               app.kubernetes.io/component: garage
       ports:
         - { port: 3900, protocol: TCP }
+    {{- if .Values.postgres.enabled }}
+    # pg_dump reads the platform database.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "platform.postgresName" . }}
+      ports:
+        - { port: 5432, protocol: TCP }
+    {{- end }}
 {{- end }}
 {{- end }}

@@ -1,13 +1,9 @@
-import type Database from "better-sqlite3";
 import type { Db } from "./db";
 
-export function computeMetrics(db: Db) {
-  const created = db.prepare(`select count(*) as c from store_events where type='created'`).get().c as number;
-  const ready = db.prepare(`select count(*) as c from store_events where type='ready'`).get().c as number;
-  const failed = db.prepare(`select count(*) as c from store_events where type='failed'`).get().c as number;
-  const deleted = db.prepare(`select count(*) as c from store_events where type='deleted'`).get().c as number;
-
-  return { created, ready, failed, deleted };
+export async function computeMetrics(db: Db) {
+  const count = async (type: string) =>
+    (await db.get<{ c: number }>(`select count(*) as c from store_events where type = ?`, type))?.c ?? 0;
+  return { created: await count("created"), ready: await count("ready"), failed: await count("failed"), deleted: await count("deleted") };
 }
 
 export function renderPrometheus(m: { created: number; ready: number; failed: number; deleted: number }) {

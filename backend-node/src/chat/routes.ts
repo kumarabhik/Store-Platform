@@ -8,7 +8,7 @@ import { runChat, type ChatDeps, type ChatEvent } from "./agent";
 
 export interface ChatRoutesDeps {
   deps: Omit<ChatDeps, "llm"> & { llm: ChatDeps["llm"] | null };
-  currentUser: (req: FastifyRequest) => PublicUser | null;
+  currentUser: (req: FastifyRequest) => Promise<PublicUser | null>;
 }
 
 const body = z.object({
@@ -17,7 +17,7 @@ const body = z.object({
 
 export function registerChatRoutes(app: FastifyInstance, { deps, currentUser }: ChatRoutesDeps) {
   app.post("/api/chat", async (req, reply) => {
-    const user = currentUser(req);
+    const user = await currentUser(req);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
     if (!deps.llm) {
       return reply.code(503).send({ error: "chat_unavailable", message: "Chat: no LLM configured (set LLM_API_KEY in Secret platform-api-env)" });
@@ -46,11 +46,11 @@ export function registerChatRoutes(app: FastifyInstance, { deps, currentUser }: 
   // The answer to an approval_required event (P10). Only the user whose chat is waiting can answer;
   // an unknown, expired or someone else's id is 404.
   app.post("/api/chat/approvals/:id", async (req, reply) => {
-    const user = currentUser(req);
+    const user = await currentUser(req);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
     const parsed = z.object({ approve: z.boolean() }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid", message: "Chat: body must be {\"approve\": true|false}" });
-    const found = deps.approvals?.store.decide((req.params as { id: string }).id, user.id, parsed.data.approve) ?? false;
+    const found = (await deps.approvals?.store.decide((req.params as { id: string }).id, user.id, parsed.data.approve)) ?? false;
     if (!found) return reply.code(404).send({ error: "not_found", message: "Chat: no pending approval with this id (answered, expired, or not yours)" });
     return { ok: true };
   });

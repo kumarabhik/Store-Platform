@@ -6,9 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildEngineValues } from "../src/engine";
 import { parseApiServerEndpoints } from "../src/kube";
 import { sqliteAvailable } from "./sqlite";
+import { testDb } from "./testDb";
 
 describe("per-store Helm values (DESIGN §11)", () => {
-  it("carries only what differs per store, and survives hostile store names", () => {
+  it("carries only what differs per store, and survives hostile store names", async () => {
     const built = buildEngineValues({
       engine: "woocommerce",
       ingressClassName: "nginx",
@@ -27,7 +28,7 @@ describe("per-store Helm values (DESIGN §11)", () => {
     expect(buildEngineValues({ engine: "woocommerce", ingressClassName: "nginx", host: "h", publicUrl: "u", storeName: "n", backup: true }).valuesYaml).toContain("backup:\n  enabled: true");
   });
 
-  it("keeps medusa stubbed", () => {
+  it("keeps medusa stubbed", async () => {
     expect(buildEngineValues({ engine: "medusa", ingressClassName: "nginx", host: "h", publicUrl: "u", storeName: "n" }).stubbed).toBe(true);
   });
 });
@@ -43,7 +44,7 @@ describe("seed tool_policies (S2)", () => {
 });
 
 describe("KUBE_API_ENDPOINTS parsing", () => {
-  it("reads ip:port pairs and drops anything else", () => {
+  it("reads ip:port pairs and drops anything else", async () => {
     expect(parseApiServerEndpoints("192.168.49.2:8443, 10.0.0.5:6443,junk,1.2.3.4:x")).toEqual([
       { ip: "192.168.49.2", port: 8443 },
       { ip: "10.0.0.5", port: 6443 },
@@ -71,7 +72,7 @@ afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 describe.skipIf(!sqliteAvailable)("store MCP registration", () => {
   const setup = async () => {
     const m = await load();
-    const db = m.openDb(path.join(dir, "s.db"));
+    const db = await testDb("stores");
     const registry = m.createRegistry(db, crypto.randomBytes(32), policy, resolvesTo("10.96.20.20"));
     const dropped: string[] = [];
     const rescheduled: string[] = [];
@@ -87,7 +88,7 @@ describe.skipIf(!sqliteAvailable)("store MCP registration", () => {
         return v;
       },
     };
-    db.prepare(`insert into stores (id, name, engine, status, namespace, created_at, updated_at) values ('ab12cd34', 'Anku', 'woocommerce', 'Ready', 'store-ab12cd34', datetime('now'), datetime('now'))`).run();
+    await db.run(`insert into stores (id, name, engine, status, namespace, created_at, updated_at) values ('ab12cd34', 'Anku', 'woocommerce', 'Ready', 'store-ab12cd34', ${db.now}, ${db.now})`);
     const store = { id: "ab12cd34", name: "Anku", namespace: "store-ab12cd34", release: "wc-ab12cd34" };
     return { ...m, db, registry, deps, store, secrets, dropped, rescheduled };
   };
@@ -95,14 +96,14 @@ describe.skipIf(!sqliteAvailable)("store MCP registration", () => {
   it("registers store_<id> with the store's woo-mcp URL and token, as provisioner-managed", async () => {
     const t = await setup();
     const id = await t.registerStoreServer(t.deps, t.store);
-    const s = t.registry.get(id)!;
+    const s = (await t.registry.get(id))!;
     expect(s.slug).toBe("store_ab12cd34");
     expect(s.url).toBe("http://wc-ab12cd34-woo-mcp.store-ab12cd34.svc.cluster.local/mcp");
     expect(s).toMatchObject({ managed_by: "provisioner", store_id: "ab12cd34", auth_type: "bearer", has_credential: true, name: "Store: Anku" });
-    expect(t.registry.authHeadersFor(id)).toEqual({ Authorization: "Bearer token-1" });
+    expect(await t.registry.authHeadersFor(id)).toEqual({ Authorization: "Bearer token-1" });
     expect(t.rescheduled).toEqual([id]);
     // Same S2 defaults as the default store: members read, admins change.
-    const rules = t.db.prepare(`select tool_name, min_role from tool_policies where server_id = ? order by tool_name`).all(id);
+    const rules = await t.db.all(`select tool_name, min_role from tool_policies where server_id = ? order by tool_name`, id);
     expect(rules).toEqual([
       { tool_name: "create_product", min_role: "admin" },
       { tool_name: "update_order_status", min_role: "admin" },
@@ -115,13 +116,13 @@ describe.skipIf(!sqliteAvailable)("store MCP registration", () => {
     t.secrets["store-ab12cd34/wc-ab12cd34-credentials/mcp-token"] = "token-2";
     const second = await t.registerStoreServer(t.deps, t.store);
     expect(second).toBe(first);
-    expect(t.registry.list().filter((s) => s.slug === "store_ab12cd34")).toHaveLength(1);
-    expect(t.registry.authHeadersFor(first)).toEqual({ Authorization: "Bearer token-2" });
+    expect((await t.registry.list()).filter((s) => s.slug === "store_ab12cd34")).toHaveLength(1);
+    expect(await t.registry.authHeadersFor(first)).toEqual({ Authorization: "Bearer token-2" });
     expect(t.dropped).toEqual([first]);
     // An admin's choice made after the first registration survives re-registration.
-    t.registry.setToolPolicy(first, "create_product", null);
+    (await t.registry.setToolPolicy(first, "create_product", null));
     await t.registerStoreServer(t.deps, t.store);
-    expect(t.db.prepare(`select count(*) n from tool_policies where server_id = ? and tool_name = 'create_product'`).get(first)).toEqual({ n: 0 });
+    expect(await t.db.get(`select count(*) as n from tool_policies where server_id = ? and tool_name = 'create_product'`, first)).toEqual({ n: 0 });
   });
 
   it("never takes over a slug that belongs to something else", async () => {
@@ -139,11 +140,12 @@ describe.skipIf(!sqliteAvailable)("store MCP registration", () => {
   it("remove deletes the store's servers first, so the store row can go (foreign key)", async () => {
     const t = await setup();
     const id = await t.registerStoreServer(t.deps, t.store);
-    expect(() => t.db.prepare(`delete from stores where id = 'ab12cd34'`).run()).toThrow(/FOREIGN KEY/);
-    expect(t.removeStoreServers(t.deps, "ab12cd34")).toBe(1);
-    expect(t.registry.get(id)).toBeUndefined();
+    // SQLite: "FOREIGN KEY constraint failed"; Postgres: "violates foreign key constraint".
+    await expect(t.db.run(`delete from stores where id = 'ab12cd34'`)).rejects.toThrow(/FOREIGN KEY|foreign key/);
+    expect(await t.removeStoreServers(t.deps, "ab12cd34")).toBe(1);
+    expect(await t.registry.get(id)).toBeUndefined();
     expect(t.dropped).toContain(id);
-    t.db.prepare(`delete from stores where id = 'ab12cd34'`).run();
-    expect(t.removeStoreServers(t.deps, "ab12cd34")).toBe(0);
+    await t.db.run(`delete from stores where id = 'ab12cd34'`);
+    expect(await t.removeStoreServers(t.deps, "ab12cd34")).toBe(0);
   });
 });

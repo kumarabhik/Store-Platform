@@ -39,10 +39,26 @@ api:
     CREATE_RATE_LIMIT_REFILL_PER_SEC: "0.1"
     CREATE_RATE_LIMIT_TTL_SEC: "900"
   image: "ghcr.io/kumarabhik/store-platform-api:0.1.0"
+  # Stateless with Postgres: two replicas, rolling updates, a PodDisruptionBudget (DESIGN §13.3).
+  replicas: 2
+  # No SQLite volume on a fresh production install: Postgres holds everything, and without a
+  # ReadWriteOnce volume the replicas can run on different nodes.
   persistence:
-    enabled: true
-    size: 5Gi
+    enabled: false
+
+postgres:
+  enabled: true
+  # Create before installing (letters and digits only; it goes into the connection URL):
+  #   kubectl -n platform create secret generic platform-postgres --from-literal=password=$(openssl rand -hex 24)
+  existingSecret: "platform-postgres"
+  storage:
+    size: 10Gi
     storageClassName: "local-path"
 
 dashboard:
   image: "ghcr.io/kumarabhik/store-platform-dashboard:0.1.0"
+
+# Nightly pg_dump of the platform database (users, keys, servers, audit) to the backup store.
+# deploy.sh installs charts/backups and copies the upload Secret (backup-s3) into this namespace.
+backup:
+  enabled: true
